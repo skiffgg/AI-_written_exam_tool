@@ -1,0 +1,6 @@
+# 忽略screenshots目录
+screenshots
+venv/
+__pycache__/
+*.pyc
+

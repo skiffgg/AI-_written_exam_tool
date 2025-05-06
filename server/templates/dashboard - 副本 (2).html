@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="token" content="{{ token }}">
+    <title>笔试面试AI助手</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #4a6baf;
+            --primary-light: #7a97d5;
+            --primary-dark: #2a4a8f;
+            --accent-color: #ff7043;
+            --text-color: #333333;
+            --light-text: #666666;
+            --bg-color: #f8f9fa;
+            --card-bg: #ffffff;
+            --border-radius: 12px;
+            --shadow: 0 4px 12px rgba(0,0,0,0.08);
+            --transition: all 0.3s ease;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Roboto', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, var(--bg-color) 0%, #e8eef9 100%);
+            color: var(--text-color);
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 0;
+            margin: 0;
+        }
+
+        .container-fluid {
+            padding: 0;
+            width: 100%;
+            max-width: 100%;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            box-shadow: var(--shadow);
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-weight: 700;
+            font-size: 2.5rem;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.2);
+        }
+
+        .header p {
+            margin-top: 10px;
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            margin: 0 20px 20px 20px;
+            padding: 10px 15px;
+            background-color: var(--card-bg);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-connected {
+            background-color: #4CAF50;
+            box-shadow: 0 0 5px #4CAF50;
+        }
+
+        .status-disconnected {
+            background-color: #F44336;
+            box-shadow: 0 0 5px #F44336;
+        }
+
+        .main-content {
+            display: flex;
+            width: 100%;
+            padding: 0 20px;
+        }
+
+        .left-panel {
+            flex: 1;
+            background-color: var(--card-bg);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            box-shadow: var(--shadow);
+            margin-right: 20px;
+            min-width: 300px;
+            max-width: 400px;
+        }
+
+        .right-panel {
+            flex: 2;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .analysis-card, .chat-card {
+            background-color: var(--card-bg);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            box-shadow: var(--shadow);
+            margin-bottom: 20px;
+        }
+
+        .panel-title {
+            color: var(--primary-color);
+            font-weight: 500;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+            border-bottom: 2px solid var(--primary-light);
+            padding-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
+            border: none;
+            border-radius: 6px;
+            padding: 10px 16px;
+            font-weight: 500;
+            transition: var(--transition);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+
+        .btn-primary:hover {
+            background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary-color) 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+
+        .history-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            max-height: calc(100vh - 250px);
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--primary-light) transparent;
+        }
+
+        .history-list::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .history-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .history-list::-webkit-scrollbar-thumb {
+            background-color: var(--primary-light);
+            border-radius: 6px;
+        }
+
+        .history-item {
+            margin-bottom: 15px;
+            padding: 10px;
+            background-color: rgba(255, 255, 255, 0.5);
+            border-radius: 8px;
+            transition: var(--transition);
+            position: relative;
+        }
+
+        .history-item:hover {
+            background-color: rgba(255, 255, 255, 0.8);
+            transform: translateY(-2px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .history-item img {
+            width: 100%;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: var(--transition);
+            cursor: pointer;
+        }
+
+        .history-item img:hover {
+            transform: scale(1.02);
+        }
+
+        .history-item-text {
+            margin-top: 8px;
+            font-size: 0.9rem;
+            color: var(--light-text);
+        }
+
+        .delete-history {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background-color: rgba(255, 255, 255, 0.8);
+            color: #F44336;
+            border: none;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            opacity: 0;
+            transition: var(--transition);
+        }
+
+        .history-item:hover .delete-history {
+            opacity: 1;
+        }
+
+        .delete-history:hover {
+            background-color: #F44336;
+            color: white;
+        }
+
+        .ai-analysis {
+            background-color: rgba(255, 255, 255, 0.5);
+            border-radius: 8px;
+            padding: 15px;
+            min-height: 200px;
+            max-height: calc(50vh - 100px);
+            overflow-y: auto;
+            white-space: pre-wrap;
+            line-height: 1.6;
+            scrollbar-width: thin;
+            scrollbar-color: var(--primary-light) transparent;
+        }
+
+        .ai-analysis::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .ai-analysis::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .ai-analysis::-webkit-scrollbar-thumb {
+            background-color: var(--primary-light);
+            border-radius: 6px;
+        }
+
+        #chat-history {
+            /* Adjusted height slightly if needed due to new input structure */
+            max-height: calc(30vh - 120px); /* Example adjustment */
+            overflow-y: auto; /* Ensure scrollbar is visible */
+            margin-bottom: 10px; /* Add some space before the input container */
+        }
+
+        .user-message, .ai-message {
+            margin-bottom: 10px;
+            padding: 8px 12px;
+            border-radius: 8px;
+        }
+
+        .user-message {
+            background-color: #e3f2fd;
+            margin-left: 20px;
+            border-top-left-radius: 0;
+            text-align: right; /* Align user messages to the right */
+        }
+
+        .ai-message {
+            background-color: #f1f8e9;
+            margin-right: 20px;
+            border-top-right-radius: 0;
+            text-align: left; /* Align AI messages to the left */
+        }
+
+        /* --- START: Original Chat Input Styles (Kept for reference, but overridden by new styles below) --- */
+        /*
+        .chat-input {
+            display: flex;
+            margin-top: 15px;
+        }
+
+        .chat-input input {
+            flex: 1;
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px 0 0 6px;
+            outline: none;
+            transition: var(--transition);
+            font-size: 1rem;
+        }
+
+        .chat-input input:focus {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 2px rgba(74, 107, 175, 0.2);
+        }
+
+        .chat-input button {
+            border-radius: 0 6px 6px 0;
+            padding: 0 20px;
+        }
+        */
+        /* --- END: Original Chat Input Styles --- */
+
+
+        .overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            z-index: 1000;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .close-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: none;
+            border: none;
+            color: white;
+            font-size: 30px;
+            cursor: pointer;
+            z-index: 1010;
+            transition: var(--transition);
+        }
+
+        .close-btn:hover {
+            transform: scale(1.1);
+            color: var(--accent-color);
+        }
+
+        .overlay-content {
+            position: relative;
+            max-width: 90%;
+            max-height: 70vh;
+            overflow: hidden;
+        }
+
+        .overlay-image {
+            max-width: 100%;
+            max-height: 70vh;
+            display: block;
+        }
+
+        .selection-box {
+            position: absolute;
+            border: 2px dashed var(--accent-color);
+            background-color: rgba(255, 112, 67, 0.2);
+            cursor: move;
+        }
+
+        .overlay-controls {
+            margin-top: 20px;
+            background-color: rgba(255, 255, 255, 0.95);
+            padding: 20px;
+            border-radius: var(--border-radius);
+            width: 90%;
+            max-width: 600px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .crop-info {
+            margin-bottom: 15px;
+            font-weight: 500;
+            color: var(--primary-color);
+            text-align: center;
+            font-size: 1.1rem;
+        }
+
+        .prompt-container {
+            margin-bottom: 20px;
+        }
+
+        .prompt-container label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: var(--text-color);
+        }
+
+        .prompt-container input {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            outline: none;
+            transition: var(--transition);
+            font-size: 1rem;
+        }
+
+        .prompt-container input:focus {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 2px rgba(74, 107, 175, 0.2);
+        }
+
+        .buttons {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: var(--transition);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background-color: #5a6268;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+
+        @media (max-width: 992px) {
+            .main-content {
+                flex-direction: column;
+            }
+
+            .left-panel {
+                width: 100%;
+                max-width: 100%;
+                margin-right: 0;
+                margin-bottom: 20px;
+            }
+
+            .right-panel {
+                width: 100%;
+            }
+        }
+
+        /* --- START: Added CSS for File Upload --- */
+        /* 文件上传相关样式 */
+        .chat-input-container {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            margin-top: 15px; /* Add margin like the original .chat-input */
+        }
+
+        /* Style for the text input part */
+        .chat-input-container > input[type="text"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px; /* Rounded corners all around initially */
+            outline: none;
+            transition: var(--transition);
+            font-size: 1rem;
+            margin-bottom: 8px; /* Space between text input and controls */
+        }
+
+        .chat-input-container > input[type="text"]:focus {
+             border-color: var(--primary-color);
+             box-shadow: 0 0 0 2px rgba(74, 107, 175, 0.2);
+        }
+
+
+        .chat-controls {
+            display: flex;
+            align-items: center;
+        }
+
+        .file-upload-label {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 10px 15px; /* Adjusted padding to better match button height */
+            background-color: #f0f0f0;
+            border: 1px solid #ddd;
+            border-right: none; /* Remove right border */
+            border-radius: 6px 0 0 6px;
+            transition: var(--transition);
+            height: calc(2.25rem + 2px); /* Match bootstrap default button height roughly */
+            line-height: 1.5;
+        }
+
+        .file-upload-label:hover {
+            background-color: #e0e0e0;
+        }
+
+        .file-upload-label i {
+            color: var(--light-text); /* Icon color */
+        }
+
+
+        /* Style adjustment for send button when file upload is present */
+       .chat-controls .btn-primary {
+            border-radius: 0 6px 6px 0; /* Keep right side rounded */
+            padding: 10px 20px; /* Ensure consistent padding */
+            height: calc(2.25rem + 2px); /* Match label height */
+       }
+
+        .upload-preview {
+            margin-top: 8px;
+        }
+
+        .preview-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+            margin-bottom: 8px;
+            border: 1px solid #eee;
+        }
+
+        .file-info {
+            display: flex;
+            align-items: center;
+            font-size: 0.9em;
+            color: var(--light-text);
+            overflow: hidden; /* Prevent long names from breaking layout */
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            margin-right: 10px;
+        }
+
+        .file-info i {
+            margin-right: 8px;
+            color: #555;
+        }
+
+        .remove-file {
+            background: none;
+            border: none;
+            color: #999;
+            cursor: pointer;
+            padding: 4px;
+            font-size: 1.1em;
+            line-height: 1;
+        }
+
+        .remove-file:hover {
+            color: #f44336;
+        }
+
+        /* Style for the hidden file input */
+        input[type="file"] {
+           display: none;
+        }
+
+        /* Optional: Style for attached file indicator text if needed */
+        .attached-file {
+            margin-top: 5px;
+            font-size: 0.9em;
+            color: #666;
+            padding: 3px 8px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        /* --- END: Added CSS for File Upload --- */
+
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="header">
+            <h1>笔试面试AI助手</h1>
+            <p>上传截图，获取AI分析结果</p>
+        </div>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <div id="connection-indicator" class="status-indicator status-disconnected"></div>
+                <span id="connection-status">Socket.IO: 未连接</span>
+            </div>
+            <div class="status-item">
+                <span id="api-provider">API提供商: 加载中...</span>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="left-panel">
+                <div class="panel-title">
+                    <span>历史记录</span>
+                    <button id="clear-history" class="btn btn-sm btn-danger" title="清空历史记录">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+                <button id="capture-btn" class="btn btn-primary mb-3 w-100">
+                    <i class="fas fa-camera me-2"></i>发起截屏
+                </button>
+                <ul id="history-list" class="history-list">
+                    </ul>
+            </div>
+
+            <div class="right-panel">
+                <div class="analysis-card">
+                    <h3 class="panel-title">AI分析结果</h3>
+                    <div id="ai-analysis" class="ai-analysis">
+                        等待分析结果...
+                    </div>
+                </div>
+
+                <div class="chat-card">
+                    <h3 class="panel-title">AI对话</h3>
+                    <div id="chat-history" class="ai-analysis">
+                        您可以在这里与AI进行对话...
+                    </div>
+                    <div class="chat-input-container">
+                        <input type="text" id="chat-input" placeholder="输入您的问题...">
+                        <div class="chat-controls">
+                            <label for="file-upload" class="file-upload-label">
+                                <i class="fas fa-paperclip"></i>
+                            </label>
+                            <input type="file" id="file-upload" style="display: none;"> <button id="send-chat" class="btn btn-primary">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                        <div id="upload-preview" class="upload-preview"></div> </div>
+                    </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="overlay" class="overlay">
+        <button id="close-overlay" class="close-btn">&times;</button>
+        <div class="overlay-content">
+            <img id="overlay-image" class="overlay-image" src="" alt="截图">
+            <div id="selection-box" class="selection-box"></div>
+        </div>
+
+        <div class="overlay-controls">
+            <div id="crop-info" class="crop-info">选择区域: 全图</div>
+            <div class="prompt-container">
+                <label for="prompt-input">自定义提示词:</label>
+                <input type="text" id="prompt-input" placeholder="请解读这张截图...">
+            </div>
+            <div class="buttons">
+                <button id="confirm-selection" class="btn btn-primary">
+                    <i class="fas fa-crop-alt me-2"></i>确认裁剪并分析
+                </button>
+                <button id="cancel-selection" class="btn btn-secondary">
+                    <i class="fas fa-times me-2"></i>取消
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.4.1/socket.io.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+    <script src="/static/main.js"></script>
+    <script>
+        // Basic example for file preview (you'll need more robust handling)
+        const fileInput = document.getElementById('file-upload');
+        const uploadPreview = document.getElementById('upload-preview');
+        const chatInput = document.getElementById('chat-input'); // Text input
+
+        fileInput.addEventListener('change', function() {
+            uploadPreview.innerHTML = ''; // Clear previous previews
+            if (this.files && this.files.length > 0) {
+                for (const file of this.files) {
+                    const previewItem = document.createElement('div');
+                    previewItem.classList.add('preview-item');
+
+                    const fileInfo = document.createElement('div');
+                    fileInfo.classList.add('file-info');
+                    const icon = document.createElement('i');
+                    icon.classList.add('fas', 'fa-file'); // Generic file icon
+                    fileInfo.appendChild(icon);
+                    fileInfo.appendChild(document.createTextNode(file.name));
+
+                    const removeBtn = document.createElement('button');
+                    removeBtn.classList.add('remove-file');
+                    removeBtn.innerHTML = '&times;';
+                    removeBtn.title = 'Remove file';
+                    removeBtn.onclick = () => {
+                        previewItem.remove();
+                        // Important: Also clear the file input's value
+                        // This is tricky as you can't directly remove a specific file
+                        // The easiest way is to reset the input fully
+                        fileInput.value = ''; // This clears *all* selected files
+                        // You might need more complex state management for multiple files
+                        adjustChatInputPlaceholder();
+                    };
+
+                    previewItem.appendChild(fileInfo);
+                    previewItem.appendChild(removeBtn);
+                    uploadPreview.appendChild(previewItem);
+                }
+            }
+             adjustChatInputPlaceholder();
+        });
+
+        // Adjust placeholder when a file is attached/removed
+        function adjustChatInputPlaceholder() {
+             if (uploadPreview.children.length > 0) {
+                 chatInput.placeholder = '已附加文件，可继续输入问题...';
+             } else {
+                 chatInput.placeholder = '输入您的问题...';
+             }
+        }
+
+       // Add logic to handle sending the message *with* the file data
+       // This usually involves FormData and sending it via fetch or Socket.IO
+       // The existing send button logic in main.js needs modification
+       // Example structure (needs integration with your existing send logic):
+       /*
+       document.getElementById('send-chat').addEventListener('click', () => {
+           const message = chatInput.value.trim();
+           const files = fileInput.files;
+
+           if (message || (files && files.length > 0)) {
+               const formData = new FormData();
+               formData.append('message', message);
+               if (files && files.length > 0) {
+                   // Append each file (or handle multiple files as needed)
+                   for (let i = 0; i < files.length; i++) {
+                       formData.append('file', files[i]); // Use 'file' or match server expectation
+                   }
+               }
+
+               // Send formData using fetch or socket.emit
+               // e.g., socket.emit('chat message', { message: message, fileInfo: ... }); // Need to read file content or send FormData
+               // Or: fetch('/your-chat-endpoint', { method: 'POST', body: formData });
+
+               console.log("Sending:", message, files); // Placeholder
+
+               // Clear input and preview after sending
+               chatInput.value = '';
+               uploadPreview.innerHTML = '';
+               fileInput.value = ''; // Clear selected files
+               adjustChatInputPlaceholder();
+           }
+       });
+       */
+
+    </script>
+</body>
+</html>
