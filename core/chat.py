@@ -42,6 +42,24 @@ log = logging.getLogger(__name__) # 获取当前模块的 logger
 
 # === OpenAI Chat Function (with History) ===
 
+def _prepare_system_message() -> Dict[str, Any]:
+    """准备系统消息，告诉 AI 它的角色和能力"""
+    return {
+        "role": "system",
+        "content": """你是一个有用的AI助手。回答用户的问题时，请提供准确、有帮助的信息。
+        
+如果需要展示数学公式，可以使用 LaTeX 语法：
+- 行内公式使用 $...$ 或 \\(...\\)
+- 行间公式使用 $$...$$  或 \\[...\\]
+
+例如：
+- 爱因斯坦质能方程: $E=mc^2$
+- 欧拉公式: $e^{i\\pi} + 1 = 0$
+- 二次方程求根公式: $x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$
+
+当用户询问数学、物理或其他需要公式的问题时，请使用适当的 LaTeX 语法来呈现公式。"""
+    }
+
 def _chat_openai(prompt: str, history: Optional[List[Dict[str, Any]]] = None) -> str:
     """
     调用 OpenAI Chat 模型，并支持传入对话历史。
@@ -63,7 +81,7 @@ def _chat_openai(prompt: str, history: Optional[List[Dict[str, Any]]] = None) ->
     client = openai.OpenAI(api_key=settings.openai_api_key, http_client=settings.get_httpx_client()) # Pass proxy client
     
     # --- 构建 OpenAI messages 列表 ---
-    messages = [{"role": "system", "content": "You are a helpful assistant."}] # System prompt first
+    messages = [_prepare_system_message()] # System prompt first
     
     # Add history, mapping roles
     if history:

@@ -203,7 +203,7 @@ def _task_chat_only(prompt: str, history: Optional[List[Dict[str, Any]]], reques
             # 调用支持流式输出的聊天函数
             result = chat_only_stream(prompt, history=history, stream_callback=stream_callback)
             message_text = result.get('message', '') or 'AI未返回有效内容'
-            provider = result.get('provider', 'unknown')
+            provider = result.get('provider', 'AI')
             
             # 发送完成信号
             if sid:
@@ -224,43 +224,38 @@ def _task_chat_only(prompt: str, history: Optional[List[Dict[str, Any]]], reques
             # 非流式输出模式（原始模式）
             result = chat_only(prompt, history=history)
             message_text = str(result.get('message')) or 'AI未返回有效内容'
-            provider = result.get('provider', 'unknown')
+            provider = result.get('provider', 'AI')
             
             # 发送完整响应
             if sid:
-                log.debug(f"[chat_response] 将要发送给前端: {message_text[:100]}...")
                 socketio.emit('chat_response', {
                     'request_id': request_id,
-                    'provider': provider,
-                    'message': message_text
+                    'message': message_text,
+                    'provider': provider
                 }, to=sid)
                 log.debug(f"[Task {request_id}] Emitted 'chat_response' to SID {sid}")
             else:
-                log.debug(f"[chat_response] 将要发送给前端: {message_text[:100]}...")
                 socketio.emit('chat_response', {
                     'request_id': request_id,
-                    'provider': provider,
-                    'message': message_text
+                    'message': message_text,
+                    'provider': provider
                 })
                 log.debug(f"[Task {request_id}] Emitted 'chat_response' to all clients")
-        
-        log.info(f"[Task {request_id}] Chat processing successful ({provider}) for SID {sid}.")
-            
     except Exception as e:
-        log.exception(f"[Task {request_id}] Error: Chat processing failed for SID {sid}")
+        log.exception(f"[Task {request_id}] Error in chat task: {str(e)}")
+        error_message = f"处理聊天请求时出错: {str(e)}"
+        
+        # 发送错误消息
         if sid:
-            socketio.emit('chat_error', {
+            socketio.emit('task_error', {
                 'request_id': request_id,
-                'provider': 'error',
-                'message': f"与 AI 通信时出错: {str(e)}"
+                'error': error_message
             }, to=sid)
         else:
-            socketio.emit('chat_error', {
+            socketio.emit('task_error', {
                 'request_id': request_id,
-                'provider': 'error',
-                'message': f"与 AI 通信时出错: {str(e)}"
+                'error': error_message
             })
-            log.error(f"[Task {request_id}] Cannot send chat_error: SID unknown.")
 
 def _task_process_voice(temp_audio_path: Path, request_id: str, sid: Optional[str]):
     """后台任务：执行 STT (调用 core.voice) 并调用 AI 聊天"""
