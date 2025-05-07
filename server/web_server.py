@@ -7,6 +7,14 @@ All potentially blocking external calls (STT, AI Analysis, AI Chat) are
 handled asynchronously using background tasks.
 """
 
+# 修改这行代码
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import os
+import sys
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))  # 使用 insert(0, ...) 而不是 append
+
 import os
 import base64
 import gevent
@@ -15,6 +23,8 @@ monkey.patch_all()
 import io
 import json
 import logging
+import sys
+import os
 import time
 import tempfile
 from pathlib import Path
@@ -29,8 +39,11 @@ from PIL import Image
 from werkzeug.utils import secure_filename
 
 from core.settings import settings
-from core.chat import chat_only
+
+from core.chat import chat_only, chat_only_stream
 from core.analysis import analyze_image
+
+
 
 try:
     from core.voice import transcribe_audio
@@ -162,46 +175,90 @@ def _task_analyze_image(img_bytes: bytes, url: str, timestamp_ms: int, prompt: O
         else:
             socketio.emit('analysis_error', {'request_id': task_id, 'image_url': url, 'error': str(e)})
 
-def _task_chat_only(prompt: str, history: Optional[List[Dict[str, Any]]], request_id: str, sid: Optional[str]):
+def _task_chat_only(prompt: str, history: Optional[List[Dict[str, Any]]], request_id: str, sid: Optional[str], use_streaming: bool = True):
+    """
+    后台任务：调用 AI 聊天并通过 SocketIO 将结果发送给指定客户端
+    支持流式和非流式两种模式
+    """
     response_text = ""  # ← 先初始化
-    """后台任务：调用 AI 聊天并通过 SocketIO 将结果发送给指定客户端"""
     log.info(f"[Task {request_id}] Started: Processing chat for SID {sid}. Prompt: '{prompt[:50]}...'")
+    
     try:
-        result = chat_only(prompt, history=history)
-        message_text = str(result.get('message')) or 'AI未返回有效内容'
-        provider = result.get('provider', 'unknown')
-        log.info(f"[Task {request_id}] Chat processing successful ({provider}) for SID {sid}.")
-
-        if sid:
-            log.debug(f"[chat_response] 将要发送给前端: {message_text}")
-            socketio.emit('chat_response', {
-                'request_id': request_id,
-                'provider': provider,
-                'message': message_text
-            }, to=sid)
-            log.debug(f"[Task {request_id}] Emitted 'chat_response' to SID {sid}")
+        if use_streaming:
+            # 流式输出模式
+            def stream_callback(chunk: str):
+                if sid:
+                    socketio.emit('chat_stream_chunk', {
+                        'request_id': request_id,
+                        'chunk': chunk
+                    }, to=sid)
+                else:
+                    socketio.emit('chat_stream_chunk', {
+                        'request_id': request_id,
+                        'chunk': chunk
+                    })
+                # 给 socketio 一点时间发送数据
+                socketio.sleep(0.01)
+            
+            # 调用支持流式输出的聊天函数
+            result = chat_only_stream(prompt, history=history, stream_callback=stream_callback)
+            message_text = result.get('message', '') or 'AI未返回有效内容'
+            provider = result.get('provider', 'unknown')
+            
+            # 发送完成信号
+            if sid:
+                socketio.emit('chat_stream_end', {
+                    'request_id': request_id,
+                    'provider': provider,
+                    'full_message': message_text
+                }, to=sid)
+                log.debug(f"[Task {request_id}] Emitted 'chat_stream_end' to SID {sid}")
+            else:
+                socketio.emit('chat_stream_end', {
+                    'request_id': request_id,
+                    'provider': provider,
+                    'full_message': message_text
+                })
+                log.debug(f"[Task {request_id}] Emitted 'chat_stream_end' to all clients")
         else:
-            log.debug(f"[chat_response] 将要发送给前端: {response_text}")
-            socketio.emit('chat_response', {
-                'request_id': request_id,
-                'provider': provider,
-                'message': message_text
-            })
-            log.debug(f"[Task {request_id}] Emitted 'chat_response' to all clients")
-
+            # 非流式输出模式（原始模式）
+            result = chat_only(prompt, history=history)
+            message_text = str(result.get('message')) or 'AI未返回有效内容'
+            provider = result.get('provider', 'unknown')
+            
+            # 发送完整响应
+            if sid:
+                log.debug(f"[chat_response] 将要发送给前端: {message_text[:100]}...")
+                socketio.emit('chat_response', {
+                    'request_id': request_id,
+                    'provider': provider,
+                    'message': message_text
+                }, to=sid)
+                log.debug(f"[Task {request_id}] Emitted 'chat_response' to SID {sid}")
+            else:
+                log.debug(f"[chat_response] 将要发送给前端: {message_text[:100]}...")
+                socketio.emit('chat_response', {
+                    'request_id': request_id,
+                    'provider': provider,
+                    'message': message_text
+                })
+                log.debug(f"[Task {request_id}] Emitted 'chat_response' to all clients")
+        
+        log.info(f"[Task {request_id}] Chat processing successful ({provider}) for SID {sid}.")
+            
     except Exception as e:
         log.exception(f"[Task {request_id}] Error: Chat processing failed for SID {sid}")
         if sid:
             socketio.emit('chat_error', {
                 'request_id': request_id,
                 'provider': 'error',
-                'message': f"与 AI ({provider}) 通信时出错: {str(e)}"
+                'message': f"与 AI 通信时出错: {str(e)}"
             }, to=sid)
         else:
             socketio.emit('chat_error', {
                 'request_id': request_id,
                 'provider': 'error',
-                'message': f"与 AI ({provider}) 通信时出错: {str(e)}"
+                'message': f"与 AI 通信时出错: {str(e)}"
             })
             log.error(f"[Task {request_id}] Cannot send chat_error: SID unknown.")
 
@@ -360,6 +417,18 @@ def handle_connect():
 def handle_disconnect():
     log.info(f"Client disconnected: {request.sid}.")
 
+# --- 添加到 web_server.py ---
+
+@socketio.on('request_screenshot_capture')
+def handle_frontend_screenshot_request(sid=None): # sid 是可选的，代表发送请求的前端客户端ID
+    """处理来自网页前端的截图请求"""
+    log.info(f"服务器收到来自网页端 (SID: {sid if sid else 'Unknown'}) 的 'request_screenshot_capture' 事件。")
+    # 确认收到请求后，向所有客户端广播 'capture' 命令，
+    # app.py (GUI 客户端) 应该会监听到这个命令。
+    log.info("正在向 GUI 客户端发送 'capture' 命令...")
+    socketio.emit('capture') # 广播 capture 事件
+    # 注意：这里不需要给前端发送即时响应，前端通过后续收到的 'new_screenshot' 事件来得知截图完成
+
 @socketio.on('chat_message')
 def handle_chat_message(data):
     sid = request.sid
@@ -368,9 +437,12 @@ def handle_chat_message(data):
         log.warning(f"Invalid chat data format from {sid}")
         socketio.emit('chat_error', {'message': 'Invalid request format.'}, to=sid)
         return
+    
     prompt = data.get('prompt', '').strip()
     history_data = data.get('history', [])
     client_request_id = data.get('request_id')
+    use_streaming = data.get('use_streaming', True)  # 从请求数据中获取 use_streaming 参数，默认为 True
+    
     if not prompt:
         log.warning(f"Empty prompt in chat_message from {sid}")
         socketio.emit('chat_error', {
@@ -378,15 +450,21 @@ def handle_chat_message(data):
             'message': 'Prompt cannot be empty.'
         }, to=sid)
         return
+    
     request_id = client_request_id or str(uuid.uuid4())
     log.info(f"[Req {request_id}] Starting background task for chat from SID {sid}: '{prompt[:50]}...'")
+    
+    # 启动后台任务处理聊天请求
     socketio.start_background_task(
-        target=_task_chat_only,
+        target=_task_chat_only,      
         prompt=prompt,
         history=history_data,
         request_id=request_id,
-        sid=sid
+        sid=sid,
+        use_streaming=use_streaming
     )
+    
+    # 发送处理中的状态
     socketio.emit('chat_processing', {'request_id': request_id, 'status': 'processing'}, to=sid)
 
 @app.route('/')
@@ -662,6 +740,7 @@ def chat():
 
     prompt = data.get('prompt', '').strip()
     history_data = data.get('history', [])
+    use_streaming = data.get('use_streaming', False)  # HTTP 请求默认不使用流式输出
 
     if not prompt:
         return jsonify({'error': 'Empty prompt', 'request_id': request_id}), 400
@@ -672,11 +751,13 @@ def chat():
         prompt=prompt,
         history=history_data,
         request_id=request_id,
-        sid=None
+        sid=None,
+        use_streaming=use_streaming
     )
+    
     return jsonify({
         'status': 'processing',
-        'message': 'Chat request received, processing in background.',
+        'message': '请求已收到，AI正在后台处理...',
         'request_id': request_id
     }), 202
 
@@ -756,7 +837,8 @@ def chat_with_file():
                     'prompt': final_prompt_for_ai,
                     'history': history_data,
                     'request_id': request_id,
-                    'sid': None
+                    'sid': None,
+                    'use_streaming': False  # 文件处理默认不使用流式输出
                 }
             else:
                 file_type = "unsupported"

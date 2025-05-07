@@ -16,6 +16,51 @@ from core.analysis import analyze_image
 from core.settings import settings
 from tkinter.scrolledtext import ScrolledText
 from gui.local_connection import LocalConnection
+import subprocess
+import os
+import sys
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+import os
+import sys
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+def start_server():
+    """启动 web_server.py"""
+    try:
+        # 确定 web_server.py 的路径
+        server_script = os.path.join(os.path.dirname(__file__), "../server/web_server.py")
+        
+        # 启动服务器进程
+        logger.info("正在启动服务器...")
+        server_process = subprocess.Popen(
+            [sys.executable, server_script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        time.sleep(2)  # 等待服务器启动完成
+        logger.info("服务器已启动")
+        return server_process
+    except Exception as e:
+        logger.error(f"启动服务器失败: {e}")
+        sys.exit(1)
+
+def stop_server(server_process):
+    """停止服务器进程"""
+    try:
+        logger.info("正在停止服务器...")
+        server_process.terminate()
+        server_process.wait()
+        logger.info("服务器已停止")
+    except Exception as e:
+        logger.error(f"停止服务器失败: {e}")
+
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -338,7 +383,15 @@ class App:
         self.root.mainloop()
 
 if __name__ == '__main__':
-    App().run()
+    # 启动服务器
+    # server_process = start_server()
+
+    try:
+        # 启动客户端应用
+        App().run()
+    finally:
+        # 确保在退出时停止服务器
+        stop_server(server_process)
 
 ##################################v1####################################
 

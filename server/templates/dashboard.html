@@ -98,15 +98,25 @@
                             </div>
                             <div class="chat-input-container">
                                  <div id="chat-upload-preview" class="upload-preview"></div>
-                                 <input type="text" id="chat-chat-input" placeholder="输入您的问题，或附加文件..." aria-label="聊天输入框">
+                                 <textarea id="chat-chat-input" placeholder="输入您的问题..."></textarea>
                                  <div class="chat-controls">
-                                     <label for="chat-file-upload" class="file-upload-label" title="附加文件">
-                                         <i class="fas fa-paperclip"></i>
-                                     </label>
-                                     <input type="file" id="chat-file-upload" style="display: none;" aria-label="文件上传">
-                                     <button id="chat-send-chat" class="btn btn-primary" title="发送消息">
-                                         <i class="fas fa-paper-plane"></i>
-                                     </button>
+                                     <div class="chat-file-upload-container">
+                                         <label for="chat-file-upload" class="file-upload-label">
+                                             <i class="fas fa-paperclip"></i>
+                                             <span>附加文件</span>
+                                         </label>
+                                         <input type="file" id="chat-file-upload" style="display: none;">
+                                     </div>
+                                     <div class="chat-buttons">
+                                         <!-- 添加流式输出开关 -->
+                                         <div class="streaming-toggle">
+                                             <input type="checkbox" id="streaming-toggle-checkbox" checked>
+                                             <label for="streaming-toggle-checkbox">流式输出</label>
+                                         </div>
+                                         <button id="chat-send-chat" class="btn btn-primary">
+                                             <i class="fas fa-paper-plane"></i> 发送
+                                         </button>
+                                     </div>
                                  </div>
                             </div>
                         </div>
