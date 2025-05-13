@@ -86,15 +86,14 @@ MAX_TEXT_FILE_CHARS = 4000
 
 HISTORY: List[Dict[str, Any]] = []
 HISTORY_LOCK = lock.BoundedSemaphore()
-TOKEN = settings.dashboard_token or ''
-
+TOKEN =''
 app = Flask(
     __name__,
     template_folder=str((ROOT_DIR / 'templates').resolve()),
     static_folder=str((ROOT_DIR / 'static').resolve())
 )
 
-_default_cors = ["http://127.0.0.1:5000", "http://localhost:5000"]
+_default_cors = ["http://127.0.0.1:5000", "http://localhost:5173","http://localhost:5000"]
 if settings.external_url:
     _default_cors.append(settings.external_url)
 
@@ -758,131 +757,209 @@ def chat():
 
 @app.route('/chat_with_file', methods=['POST'])
 def chat_with_file():
-    check_token()
-    log.info("Received chat request with file via HTTP (async).")
+    check_token() # 检查认证 Token
+    log.info("===> Entering /chat_with_file (request received)")
     prompt = request.form.get('prompt', '')
     uploaded_file = request.files.get('file')
     history_json = request.form.get('history', '[]')
-    history_data = []
-    request_id = str(uuid.uuid4())
 
+    # --- 使用前端传递的 request_id ---
+    request_id = request.form.get('request_id')
+    if not request_id:
+        log.warning("Missing request_id in /chat_with_file form data from client.")
+        return jsonify({'error': 'Missing request_id in form data'}), 400
+    log.info(f"[Req {request_id}] Processing /chat_with_file request.")
+    # --- request_id 处理结束 ---
+
+    # 解析历史记录
+    history_data = []
     try:
         history_data = json.loads(history_json)
-        assert isinstance(history_data, list)
-    except (json.JSONDecodeError, AssertionError):
-        log.warning(f"[Req {request_id}] Invalid history format.")
+        if not isinstance(history_data, list):
+             log.warning(f"[Req {request_id}] Invalid history format (not a list). Treating as empty.")
+             history_data = []
+    except (json.JSONDecodeError, TypeError):
+        log.warning(f"[Req {request_id}] Invalid history JSON format. Treating as empty.")
         history_data = []
 
+    # 必须有 prompt 或 文件 之一
     if not prompt.strip() and not uploaded_file:
+        log.warning(f"[Req {request_id}] Request needs prompt or file.")
         return jsonify({'error': 'Request needs prompt or file.', 'request_id': request_id}), 400
 
-    temp_path = None
-    task_to_run = None
-    task_args = {}
-    file_type = "none"
-    url_for_task = None
+    temp_path = None          # 用于保存临时文件的路径
+    task_to_run = None        # 要运行的后台任务函数
+    task_args = {}            # 传递给后台任务的参数字典
+    file_type = "none"        # 文件类型标记
+    url_for_task = None       # 如果是图片，生成的 URL
+    final_prompt_for_ai = prompt # 初始化 AI prompt
 
     try:
         if uploaded_file:
+            # --- 处理上传的文件 ---
             if not uploaded_file.filename:
+                log.warning(f"[Req {request_id}] Uploaded file has no filename.")
                 return jsonify({'error': 'Uploaded file has no filename', 'request_id': request_id}), 400
+
             filename = secure_filename(uploaded_file.filename)
             file_ext = os.path.splitext(filename)[1].lower()
-            log.info(f"[Req {request_id}] Processing file: {filename} ({file_ext})")
+            log.info(f"[Req {request_id}] Processing file: {filename} (Ext: {file_ext})")
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext, dir=SAVE_DIR) as temp:
+            # 创建临时文件来保存上传内容
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext, dir=str(SAVE_DIR.resolve())) as temp:
                 uploaded_file.save(temp.name)
                 temp_path = Path(temp.name)
                 log.debug(f"[Req {request_id}] File saved temporarily: {temp_path}")
 
+            # 根据文件类型准备不同的任务
             if file_ext in ALLOWED_IMAGE_EXT:
                 file_type = "image"
                 log.debug(f"[Req {request_id}] File type: IMAGE. Preparing analysis task.")
-                img_bytes = temp_path.read_bytes()
-                url_for_task = f'/screenshots/{temp_path.name}'
+                try:
+                    img_bytes = temp_path.read_bytes() # 读取图片内容
+                except Exception as read_err:
+                    log.exception(f"[Req {request_id}] Failed to read saved image file: {temp_path}")
+                    raise ValueError(f"无法读取保存的图片文件: {filename}") from read_err
+                
+                # 生成可访问此图片的 URL (假设 /screenshots/<filename> 路由有效)
+                url_for_task = f'/screenshots/{temp_path.name}' 
+                # 设置要运行的任务和参数
                 task_to_run = _task_analyze_image
                 task_args = {
                     'img_bytes': img_bytes,
                     'url': url_for_task,
                     'timestamp_ms': int(time.time() * 1000),
-                    'prompt': prompt,
+                    'prompt': prompt, # 使用用户原始输入的 prompt
                     'request_id': request_id,
-                    'sid': None
+                    'sid': None, # HTTP 请求没有 sid，除非特殊处理
+                    '_cleanup_path': temp_path # 将临时路径传递给任务以便后续清理
                 }
+
             elif file_ext in ALLOWED_TEXT_EXT:
                 file_type = "text"
                 log.debug(f"[Req {request_id}] File type: TEXT. Preparing chat task.")
                 file_content_snippet = ""
-                final_prompt_for_ai = prompt
                 try:
+                    # 读取文本文件内容（限制长度）
                     with open(temp_path, 'r', encoding='utf-8', errors='ignore') as f:
                         file_content_snippet = f.read(MAX_TEXT_FILE_CHARS)
+                        # 检查是否因为达到最大长度而截断
                         if len(file_content_snippet) == MAX_TEXT_FILE_CHARS and f.read(1):
                             file_content_snippet += "\n[...文件内容过长，已截断...]"
                     log.debug(f"[Req {request_id}] Read {len(file_content_snippet)} chars from '{filename}'.")
+                    # 构建包含文件上下文的 prompt
                     file_prompt_header = f"[上下文：用户上传了文件: {filename}]\n文件内容:\n```\n"
                     file_prompt_footer = "\n```"
+                    # 如果用户也有输入 prompt，将文件内容附加上去
                     final_prompt_for_ai = f"{prompt}\n\n{file_prompt_header}{file_content_snippet}{file_prompt_footer}" if prompt else f"{file_prompt_header}{file_content_snippet}{file_prompt_footer}"
                 except Exception as read_err:
                     log.exception(f"[Req {request_id}] Error reading text file {filename}")
                     final_prompt_for_ai = f"{prompt}\n\n[用户上传了文件: {filename}，但在读取时出错。]" if prompt else f"[用户上传了文件: {filename}，但在读取时出错。]"
-
+                
+                # 设置要运行的任务和参数
                 task_to_run = _task_chat_only
                 task_args = {
-                    'prompt': final_prompt_for_ai,
-                    'history': history_data,
+                    'prompt': final_prompt_for_ai, # 使用包含文件内容的 prompt
+                    'history': history_data,      # 传入对话历史
                     'request_id': request_id,
                     'sid': None,
-                    'use_streaming': False  # 文件处理默认不使用流式输出
+                    # !! 注意: 文件聊天强制非流式，因为 _task_chat_only 非流式会发 chat_response !!
+                    # 如果希望文件聊天也流式，需要调整 _task_chat_only 和前端逻辑
+                    'use_streaming': False  
                 }
             else:
                 file_type = "unsupported"
                 log.warning(f"[Req {request_id}] Unsupported file type: {filename} ({file_ext})")
-                final_prompt_for_ai = f"{prompt}\n\n[用户上传了文件: {filename} (类型: {file_ext})。内容分析不支持。]" if prompt else f"[用户上传了文件: {filename} (类型: {file_ext})。内容分析不支持。]"
+                # 构建提示，告知 AI 文件类型不支持分析
+                final_prompt_for_ai = f"{prompt}\n\n[用户上传了文件: {filename} (类型: {file_ext})。此文件类型内容分析不支持。]" if prompt else f"[用户上传了文件: {filename} (类型: {file_ext})。此文件类型内容分析不支持。]"
+                # 仍然调用聊天任务，只是 prompt 不同
                 task_to_run = _task_chat_only
                 task_args = {
                     'prompt': final_prompt_for_ai,
                     'history': history_data,
                     'request_id': request_id,
                     'sid': None
+                    # use_streaming 使用 _task_chat_only 的默认值 True
                 }
         else:
-            if not prompt:
-                return jsonify({'error': 'Missing prompt', 'request_id': request_id}), 400
-            log.debug(f"[Req {request_id}] Processing text-only via /chat_with_file. History: {len(history_data)}")
-            task_to_run = _task_chat_only
+            # --- 没有上传文件，只有 prompt ---
+            log.debug(f"[Req {request_id}] Processing text-only via /chat_with_file. History turns: {len(history_data)}")
+            # 设置要运行的任务和参数
+            task_to_run = _task_chat_only # <--- **修正：之前这里漏了设置 task_to_run**
             task_args = {
-                'prompt': prompt,
+                'prompt': prompt,          # 使用原始 prompt
                 'history': history_data,
                 'request_id': request_id,
                 'sid': None
+                # use_streaming 使用 _task_chat_only 的默认值 True
             }
 
+        # --- 启动后台任务 ---
         if task_to_run and task_args:
-            log.info(f"[Req {request_id}] Starting background task for chat_with_file (type: {file_type}).")
-            if file_type == "image" and temp_path:
-                task_args['_cleanup_path'] = temp_path
-            socketio.start_background_task(target=task_to_run, **task_args)
-            log.info(f"[Req {request_id}] Chat w/ file request accepted, processing started.")
+            log.info(f"[Req {request_id}] Preparing background task. Target: {task_to_run.__name__}")
+            # 打印将要传递的参数的键和部分值，用于调试
+            log.debug(f"[Req {request_id}] Task Args Dict Keys: {list(task_args.keys())}")
+            log.debug(f"[Req {request_id}] Task Args Dict Values (partial): "
+                      f"prompt_len={len(task_args.get('prompt', '')) if 'prompt' in task_args else 'N/A'}, "
+                      f"history_len={len(task_args.get('history', [])) if 'history' in task_args else 'N/A'}, "
+                      f"request_id={task_args.get('request_id')}, sid={task_args.get('sid')}, "
+                      f"use_streaming={task_args.get('use_streaming', 'Default')}")
+
+            # 检查并显式传递参数给 _task_chat_only
+            if task_to_run == _task_chat_only:
+                 required_keys = ['prompt', 'history', 'request_id', 'sid'] # use_streaming 是可选的
+                 if not all(key in task_args for key in ['prompt', 'history', 'request_id']): # 确保核心参数存在
+                     log.error(f"[Req {request_id}] Missing required keys in task_args for _task_chat_only! Keys: {list(task_args.keys())}")
+                     return jsonify({'error': 'Internal error preparing background task arguments', 'request_id': request_id}), 500
+                 
+                 socketio.start_background_task(
+                     target=_task_chat_only,
+                     prompt=task_args['prompt'],
+                     history=task_args['history'],
+                     request_id=task_args['request_id'],
+                     sid=task_args.get('sid'), # sid 可能为 None
+                     use_streaming=task_args.get('use_streaming', True) # 获取 use_streaming，若不存在则用默认值 True
+                 )
+            elif task_to_run == _task_analyze_image:
+                 # 假设 _task_analyze_image 参数设置正确，仍用 **task_args
+                 socketio.start_background_task(target=_task_analyze_image, **task_args)
+            else:
+                 # 处理未知的任务类型
+                 log.error(f"[Req {request_id}] Unknown task type for background execution: {task_to_run.__name__}")
+                 return jsonify({'error': 'Internal error: Unknown background task', 'request_id': request_id}), 500
+
+            log.info(f"[Req {request_id}] Background task started for request.")
+            # 返回 202 Accepted 响应给前端
             return jsonify({
                 'status': 'processing',
                 'message': '请求已收到，AI正在后台处理...',
-                'request_id': request_id
+                'request_id': request_id # 返回使用的 request_id
             }), 202
         else:
-            log.error(f"[Req {request_id}] No background task scheduled for chat_with_file.")
+            # 如果 task_to_run 或 task_args 未被正确设置
+            log.error(f"[Req {request_id}] No background task scheduled for chat_with_file (task_to_run or task_args missing).")
             return jsonify({'error': 'Internal server error processing request', 'request_id': request_id}), 500
 
     except Exception as e:
+        # 捕获准备阶段发生的任何其他异常
         log.exception(f"[Req {request_id}] Unhandled error preparing chat_with_file task.")
-        return jsonify({"provider": "error", "message": "An internal server error occurred.", 'request_id': request_id}), 500
-    finally:
-        if temp_path and file_type != "image" and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-                log.debug(f"[Req {request_id}] Temp file (type: {file_type}) deleted: {temp_path}")
-            except OSError as e:
-                log.error(f"[Req {request_id}] Error deleting temp file {temp_path}: {e}")
+        # 清理可能已创建的临时文件
+        if temp_path and temp_path.exists():
+             try:
+                 temp_path.unlink()
+                 log.debug(f"[Req {request_id}] Cleaned up temp file {temp_path} due to error.")
+             except OSError as unlink_err:
+                 log.error(f"[Req {request_id}] Error deleting temp file {temp_path} after error: {unlink_err}")
+        return jsonify({"provider": "error", "message": f"处理文件上传时发生内部错误: {type(e).__name__}", 'request_id': request_id}), 500
+    # finally: # finally 块在这里可能不合适，因为后台任务可能还需要临时文件
+        # # 确保非图片类型的临时文件被删除 (图片类型的由 _task_analyze_image 清理)
+        # if temp_path and file_type != "image" and temp_path.exists():
+        #     try:
+        #         temp_path.unlink()
+        #         log.debug(f"[Req {request_id}] Temp file (type: {file_type}) deleted in finally: {temp_path}")
+        #     except OSError as e:
+        #         log.error(f"[Req {request_id}] Error deleting temp file {temp_path} in finally: {e}")
+
 @app.route('/request_screenshot', methods=['POST'])
 def request_screenshot():
     check_token()

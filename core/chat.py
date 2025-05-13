@@ -117,7 +117,8 @@ def _chat_openai(prompt: str, history: Optional[List[Dict[str, Any]]] = None) ->
             model=DEFAULT_MODEL_OPENAI,
             messages=messages,
             # **generation_params # Add other params if needed
-            max_tokens=2048 # 直接在这里设置，覆盖默认值
+            max_completion_tokens=2048
+            # max_tokens=2048 # 直接在这里设置，覆盖默认值
         )
         response_content = chat_completion.choices[0].message.content
         log.info("OpenAI Chat 调用成功。")
@@ -170,7 +171,8 @@ def _chat_openai_stream(prompt: str, history: Optional[List[Dict[str, Any]]] = N
         stream = client.chat.completions.create(
             model=DEFAULT_MODEL_OPENAI,
             messages=messages,
-            max_tokens=2048,
+            # max_tokens=2048,
+            max_completion_tokens=2048,
             stream=True  # 启用流式输出
         )
         

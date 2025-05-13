@@ -6,6 +6,17 @@
  */
 
 // --- Global Variables & State ---
+
+
+
+import renderMathInElement from 'katex/contrib/auto-render'
+import 'katex/dist/katex.min.css';
+import MarkdownIt from 'markdown-it';
+import hljs from 'highlight.js';
+// 你可以选择一个你喜欢的主题。这里以 'github.min.css' 为例，与你之前 CDN 使用的一致。
+// 如果你想使用其他主题，请相应修改路径。
+import 'highlight.js/styles/github.min.css';
+
 let TOKEN = '';
 let selection = { x: 0, y: 0, width: 0, height: 0 };
 let isDragging = false;
@@ -25,6 +36,54 @@ let md = null; // Markdown-it instance
 function debugLog(message) {
     console.log(`[AI DEBUG] ${message}`);
 }
+
+// --- File Upload Handling ---
+
+
+// --- **** NEW: Preprocessing Function **** ---
+/**
+ * 预处理 AI 消息文本，将非标准的 LaTeX 分隔符统一为 $ 和 $$
+ * @param {string} text 原始消息文本
+ * @returns {string} 处理后的文本
+ */
+function preprocessTextForRendering(text) {
+    if (!text) return "";
+    let processedText = String(text); // 确保输入是字符串
+    let latexConversionHappened = false;
+
+    // --- 原 preprocessLatexSeparators 的逻辑 ---
+    // 1. 替换块级公式分隔符 \[ ... \] 为 $$ ... $$
+    processedText = processedText.replace(/\\\[([\s\S]*?)\\\]/g, (match, group1) => {
+        latexConversionHappened = true;
+        return '$$' + group1.trim() + '$$';
+    });
+
+    // 2. 替换行内公式分隔符 \( ... \) 为 $ ... $
+    processedText = processedText.replace(/\\\(([\s\S]*?)\\\)/g, (match, group1) => {
+        latexConversionHappened = true;
+        return '$' + group1.trim() + '$';
+    });
+
+    if (latexConversionHappened) {
+        // 注意：如果你还想保留这个特定的日志，可以这样做。
+        // 或者，如果主要目的是看转换是否发生，这个标志本身可能就足够了，不一定每次都打印日志。
+        console.log("[Preprocess] LaTeX separators were converted by preprocessTextForRendering.");
+    }
+
+    // --- 原 preprocessSpecialCharacters 的逻辑 ---
+    // 将弯单引号 (apostrophe/prime, U+2019) 替换为直单引号 (apostrophe, U+0027)
+    processedText = processedText.replace(/’/g, "'");
+
+    // 你可以在这里按需添加其他特殊字符的替换规则
+    // 例如，更通用的弯双引号替换:
+    // processedText = processedText.replace(/[“”]/g, '"'); 
+    // 或者针对 LaTeX 文本模式的引号 (如果 typographer 未正确处理):
+    // processedText = processedText.replace(/“/g, "``");
+    // processedText = processedText.replace(/”/g, "''");
+
+    return processedText;
+}
+
 
 function formatFileSize(bytes) {
     if (bytes < 0) return 'Invalid size';
@@ -94,60 +153,75 @@ function handleFileUpload(e) {
 }
 
 // --- LaTeX and Markdown Rendering ---
+// --- LaTeX and Markdown Rendering ---
 function renderLatexInElement(element) {
-    if (!element) { return; }
-    if (typeof window.renderMathInElement === 'function') {
-        // console.log("[KaTeX] Attempting to render math in element:", element);
-        try {
-            window.renderMathInElement(element, {
-                delimiters: [
-                    { left: '$$', right: '$$', display: true }, { left: '$', right: '$', display: false },
-                    { left: '\\(', right: '\\)', display: false }, { left: '\\[', right: '\\]', display: true }
-                ],
-                throwOnError: false,
-                ignoredClasses: ["no-katex-render", "hljs", "no-math", "highlight", "language-"]
-            });
-            // if (element.querySelector('.katex')) { console.log("[KaTeX] KaTeX elements were created in:", element); }
-            // else { console.log("[KaTeX] No KaTeX elements created (maybe no math) in:", element); }
-        } catch (error) {
-            console.error("[KaTeX] Error during renderMathInElement call:", error, "on element:", element);
-        }
-    } else {
-        console.warn("[KaTeX] window.renderMathInElement is NOT available when trying to render for element:", element.id || element.className, element);
+    if (!element) return;
+    try {
+        // 直接调用导入的 renderMathInElement (它应该在文件顶部被 import)
+        renderMathInElement(element, { 
+            delimiters: [
+                { left: '$$', right: '$$', display: true },
+                { left: '$', right: '$', display: false },
+                { left: '\\(', right: '\\)', display: false },
+                { left: '\\[', right: '\\]', display: true }
+            ],
+            throwOnError: false,
+            ignoredClasses: ["no-katex-render", "hljs", "no-math", "highlight", "language-"]
+        });
+    } catch (error) {
+        console.error("[KaTeX] Rendering error (通过 import):", error, "on element:", element);
     }
 }
 
 function initMarkdownRenderer() {
     console.log("[MD RENDERER] Initializing markdown-it...");
     try {
-        if (typeof window.markdownit === 'function') {
-            md = window.markdownit({
-                html: true, breaks: true, langPrefix: 'language-', linkify: true, typographer: true, quotes: '“”‘’',
+        // 确保 MarkdownIt 已经按照上一步的建议导入和实例化
+        if (typeof MarkdownIt === 'function') { 
+            md = new MarkdownIt({
+                html: true,
+                breaks: true,
+                langPrefix: 'language-',
+                linkify: true,
+                typographer: false,
+                quotes: '“”‘’',
                 highlight: function (str, lang) {
-                    if (lang && window.hljs && window.hljs.getLanguage(lang)) {
+                    // 使用导入的 hljs
+                    if (lang && hljs && hljs.getLanguage(lang)) { // <--- 修改这里: window.hljs -> hljs
                         try {
                             return '<pre class="hljs"><code>' +
-                                   window.hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
+                                   hljs.highlight(str, { language: lang, ignoreIllegals: true }).value + // <--- 修改这里: window.hljs -> hljs
                                    '</code></pre>';
                         } catch (e) { console.error("[HLJS] Error highlighting:", e); }
                     }
-                    return '<pre class="hljs"><code>' + (md && md.utils ? md.utils.escapeHtml(str) : escapeHtml(str)) + '</code></pre>';
+                    // 确保 md.utils.escapeHtml 在 md 实例化前不可用，所以这里用你全局的 escapeHtml
+                    // 或者，如果 md 已经实例化，可以使用 md.utils.escapeHtml(str)
+                    return '<pre class="hljs"><code>' + escapeHtml(str) + '</code></pre>'; 
                 }
             });
             console.log("[MD RENDERER] ✅ markdown-it initialized successfully.");
-        } else { throw new Error("window.markdownit is not a function."); }
+        } else {
+            throw new Error("Imported MarkdownIt is not a function.");
+        }
     } catch (e) {
         console.error("[MD RENDERER] ❌ Failed to initialize markdown-it:", e);
-        md = { render: function(text) { return escapeHtml(text).replace(/\n/g, '<br>'); }, utils: { escapeHtml: escapeHtml } };
+        md = { 
+            render: function(text) { return escapeHtml(text).replace(/\n/g, '<br>'); },
+            utils: { escapeHtml: escapeHtml }
+        };
         console.warn("[MD RENDERER] ⚠️ Using basic fallback markdown renderer.");
     }
 }
 
-function processAIMessage(messageElement, messageText) {
+function processAIMessage(messageElement, messageText, sourceEvent = "unknown") {
     let strongTag = messageElement.querySelector('strong');
     if (!strongTag) {
         strongTag = document.createElement('strong');
-        messageElement.insertBefore(strongTag, messageElement.firstChild);
+        if (messageElement.firstChild) {
+            messageElement.insertBefore(strongTag, messageElement.firstChild);
+        } else {
+            messageElement.appendChild(strongTag);
+        }
     }
     const providerName = messageElement.dataset.provider || 'AI';
     strongTag.textContent = `${providerName}: `;
@@ -155,24 +229,62 @@ function processAIMessage(messageElement, messageText) {
     let contentDiv = messageElement.querySelector('.message-content');
     const streamingSpan = messageElement.querySelector('.ai-response-text-streaming');
 
-    if (streamingSpan) { streamingSpan.remove(); }
+    if (streamingSpan) {
+        console.log(`[KaTeX Debug from ${sourceEvent}] Removing streamingSpan for message:`, String(messageText || "").substring(0, 50) + "...");
+        streamingSpan.remove();
+    }
 
     if (!contentDiv) {
         contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
-        if(strongTag.nextSibling) messageElement.insertBefore(contentDiv, strongTag.nextSibling);
-        else messageElement.appendChild(contentDiv);
+        if (strongTag.nextSibling) {
+            messageElement.insertBefore(contentDiv, strongTag.nextSibling);
+        } else {
+            messageElement.appendChild(contentDiv);
+        }
     }
-    contentDiv.innerHTML = '';
+    contentDiv.innerHTML = ''; // 清空内容，为新的渲染做准备
 
-    if (md && typeof md.render === 'function') {
-        contentDiv.innerHTML = md.render(String(messageText || ""));
+    // 将原始消息文本转换为字符串并进行统一预处理
+    let textToRender = String(messageText || "");
+    
+    if (typeof preprocessTextForRendering === 'function') {
+        textToRender = preprocessTextForRendering(textToRender);
     } else {
-        contentDiv.innerHTML = escapeHtml(String(messageText || "")).replace(/\n/g, '<br>');
+        // 如果函数缺失，可以给一个警告，避免静默失败
+        console.warn("Warning: preprocessTextForRendering function is not defined. Text preprocessing skipped.");
     }
+
+    // 使用经过预处理的文本进行 Markdown 渲染
+    if (md && typeof md.render === 'function') {
+        contentDiv.innerHTML = md.render(textToRender);
+    } else {
+        contentDiv.innerHTML = escapeHtml(textToRender).replace(/\n/g, '<br>');
+    }
+
+    // --- 日志代码可以保持不变，或者按需调整 ---
+    // 例如，确保 "Raw messageText passed to markdown-it:" 仍然是你期望记录的原始或中间状态的文本
+    // 而 "contentDiv HTML BEFORE KaTeX render:" 会显示最终的、将要给 KaTeX 处理的 HTML
+    if (sourceEvent === "chat_stream_end") {
+        console.log(`%c[KaTeX Debug from ${sourceEvent}] FINAL KaTeX Processing:`, "color: blue; font-weight: bold;");
+        console.log("Original messageText for logs:", messageText); // 原始的、未处理的 messageText
+        console.log("Text after preprocessing (passed to md.render):", textToRender); // 经过统一预处理后的文本
+        console.log("contentDiv HTML BEFORE KaTeX render:", contentDiv.innerHTML);
+    } else if (sourceEvent === "test_button") {
+        console.log(`%c[KaTeX Debug from ${sourceEvent}] TEST BUTTON KaTeX Processing:`, "color: green; font-weight: bold;");
+        console.log("Original messageText (testMD) for logs:", messageText);
+        console.log("Text after preprocessing (passed to md.render):", textToRender);
+        console.log("contentDiv HTML BEFORE KaTeX render (Test Button):", contentDiv.innerHTML);
+    } else if (sourceEvent === "history_load") {
+        console.log(`%c[KaTeX Debug from ${sourceEvent}] HISTORY LOAD KaTeX Processing:`, "color: orange; font-weight: bold;");
+        console.log("Original messageText (history) for logs:", messageText);
+        console.log("Text after preprocessing (passed to md.render):", textToRender);
+        console.log("contentDiv HTML BEFORE KaTeX render (History):", contentDiv.innerHTML);
+    }
+    // --- 日志代码结束 ---
+
     renderLatexInElement(contentDiv);
 }
-
 // --- Socket.IO Event Handlers & AI Message Processing ---
 function handleAiResponseMessage(data, isStreamEndOrFullMessage = false) {
     // This function is now primarily a wrapper if needed, or its logic integrated into socket handlers.
@@ -182,52 +294,25 @@ function handleAiResponseMessage(data, isStreamEndOrFullMessage = false) {
      // The spinner removal and history update logic is now more tightly coupled with specific socket events.
 }
 
+// --- Global Variables & State ---
+
+
 function initSocketIO() {
-    debugLog('Initializing Socket.IO connection...');
-    socket = io(window.API_BASE_URL || window.location.origin, { transports: ['websocket', 'polling'], reconnectionAttempts: 5, reconnectionDelay: 1000, timeout: 20000 });
-    socket.on('connect', () => { debugLog('Socket.IO Connected'); updateConnectionStatus(true); getApiInfo(); socket.emit('request_history'); });
-    socket.on('disconnect', (reason) => { debugLog(`Socket.IO Disconnected: ${reason}`); updateConnectionStatus(false); });
-    socket.on('connect_error', (error) => { debugLog(`Socket.IO Connection Error: ${error.message}`); updateConnectionStatus(false); });
-    // ... other basic socket event handlers: 'capture', 'new_screenshot', 'analysis_result', 'analysis_error', 'history', 'api_info'
-    socket.on('new_screenshot', (data) => addHistoryItem(data));
-    socket.on('analysis_result', (data) => { const el = document.getElementById('ss-ai-analysis'); if (el && data?.analysis) { el.textContent = data.analysis; if (data.image_url) el.dataset.sourceUrl = data.image_url; } });
-    socket.on('analysis_error', (errorData) => { console.error(`Analysis Error for ${errorData?.image_url}: ${errorData?.error}`); alert(`AI分析图片 ${errorData?.image_url || ''} 失败: ${errorData?.error || '未知错误'}`); const el = document.getElementById('ss-ai-analysis'); if (el && el.dataset.sourceUrl === errorData?.image_url) el.textContent = `分析失败: ${errorData?.error || '未知错误'}`; });
-    socket.on('history', (historyData) => { const listEl = document.getElementById('ss-history-list'); if (listEl) { listEl.innerHTML = ''; historyData.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).forEach(addHistoryItem); } });
-    socket.on('api_info', (apiData) => updateApiInfo(apiData));
+    socket = io({
+        path: '/socket.io',
+        auth: { token: TOKEN }
+    });
 
+    socket.on('connect', function() {
+        console.log('[Socket] Connected to server');
+        const statusEl = document.getElementById('connection-status');
+        if (statusEl) statusEl.textContent = '已连接';
+    });
 
-    socket.on('chat_response', (data) => { // For non-streaming full responses
-        console.log(`[Socket] Received 'chat_response' for requestId: ${data.request_id}`, data);
-        const chatHistoryEl = document.getElementById('chat-chat-history');
-        if (!chatHistoryEl) { console.error("Chat history element not found for chat_response."); return; }
-
-        const thinkingDiv = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${data.request_id}"]`);
-        if (thinkingDiv) { removeThinkingIndicator(chatHistoryEl, thinkingDiv); }
-
-        let aiDiv = chatHistoryEl.querySelector(`.ai-message[data-request-id="${data.request_id}"]:not(.ai-thinking)`);
-        if (!aiDiv) {
-            aiDiv = document.createElement('div');
-            aiDiv.className = 'ai-message';
-            aiDiv.dataset.requestId = data.request_id;
-            // Strong tag and content div will be added by processAIMessage
-            chatHistoryEl.appendChild(aiDiv);
-        }
-        processAIMessage(aiDiv, data.full_message || data.message || "");
-
-        // Update history
-        let activeSession = chatSessions.find(s => s.id === (data.session_id || currentChatSessionId));
-        if (activeSession) {
-            const finalMsgText = data.full_message || data.message || "";
-            const tempMsgIndex = activeSession.history.findIndex(msg => msg.temp_id === data.request_id);
-            if (tempMsgIndex > -1) {
-                activeSession.history[tempMsgIndex] = { role: 'model', parts: [{ text: finalMsgText }], provider: data.provider || 'AI' };
-                delete activeSession.history[tempMsgIndex].temp_id;
-            } else {
-                 activeSession.history.push({ role: 'model', parts: [{ text: finalMsgText }], provider: data.provider || 'AI' });
-            }
-            saveChatSessionsToStorage();
-        }
-        scrollToChatBottom(chatHistoryEl);
+    socket.on('connect_error', function(error) {
+        console.error('[Socket] Connection error:', error.message);
+        const statusEl = document.getElementById('connection-status');
+        if (statusEl) statusEl.textContent = '连接失败: ' + error.message;
     });
 
     socket.on('chat_stream_chunk', function(data) {
@@ -238,18 +323,12 @@ function initSocketIO() {
 
         if (!aiDiv) {
             const thinkingDiv = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${data.request_id}"]`);
-            if (thinkingDiv) { removeThinkingIndicator(chatHistoryEl, thinkingDiv); }
-            else { console.warn(`[chat_stream_chunk] First chunk for ${data.request_id}, but NO specific thinkingDiv found to remove.`);}
+            if (thinkingDiv) removeThinkingIndicator(chatHistoryEl, thinkingDiv);
 
             aiDiv = document.createElement('div');
             aiDiv.className = 'ai-message';
             aiDiv.dataset.requestId = data.request_id;
-            if(data.provider) aiDiv.dataset.provider = data.provider;
-
-
-            const strongTag = document.createElement('strong');
-            strongTag.textContent = `${data.provider || 'AI'}: `;
-            aiDiv.appendChild(strongTag);
+            if (data.provider) aiDiv.dataset.provider = data.provider;
 
             textSpan = document.createElement('span');
             textSpan.className = 'ai-response-text-streaming';
@@ -261,185 +340,328 @@ function initSocketIO() {
             if (textSpan) {
                 textSpan.textContent += (data.chunk || '');
             } else {
-                // This case means stream_end might have already run or structure is broken
-                // Try to append to .message-content if it exists, otherwise create it
                 let contentDiv = aiDiv.querySelector('.message-content');
-                if(!contentDiv) {
+                if (!contentDiv) {
                     contentDiv = document.createElement('div');
                     contentDiv.className = 'message-content';
-                    // Ensure strong tag exists if we are creating contentDiv here
-                    if(!aiDiv.querySelector('strong')){
-                        const strongTag = document.createElement('strong');
-                        strongTag.textContent = `${data.provider || 'AI'}: `;
-                        aiDiv.insertBefore(strongTag, aiDiv.firstChild);
-                    }
                     aiDiv.appendChild(contentDiv);
                 }
-                console.warn(`[chat_stream_chunk] Appending chunk to .message-content for ${data.request_id} as streaming span was missing.`);
                 contentDiv.textContent += (data.chunk || '');
             }
         }
+        // 立即渲染当前内容
+        const contentDiv = aiDiv.querySelector('.message-content') || aiDiv.querySelector('.ai-response-text-streaming');
+        if (contentDiv) renderLatexInElement(contentDiv);
         scrollToChatBottom(chatHistoryEl);
     });
 
     socket.on('chat_stream_end', function(data) {
         console.log(`[Socket] Received 'chat_stream_end' for requestId: ${data.request_id}`);
         const chatHistoryEl = document.getElementById('chat-chat-history');
-        if (!chatHistoryEl) return;
-
+        if (!chatHistoryEl) {
+            console.error("[chat_stream_end] Critical: chatHistoryEl not found.");
+            return;
+        }
+    
+        // --- 查找或创建用于显示 AI 回复的 div ---
+        // 首先尝试查找已存在的对应 request_id 的消息 div (且不是 thinking 状态)
         let aiDiv = chatHistoryEl.querySelector(`.ai-message[data-request-id="${data.request_id}"]:not(.ai-thinking)`);
-        if (!aiDiv) { // Should have been created by first chunk
-            console.warn(`[chat_stream_end] No message div found for ${data.request_id}. Creating one now.`);
-            aiDiv = document.createElement('div');
-            aiDiv.className = 'ai-message';
-            aiDiv.dataset.requestId = data.request_id;
-            if(data.provider) aiDiv.dataset.provider = data.provider;
-            chatHistoryEl.appendChild(aiDiv);
-            // Remove thinking div if it somehow still exists
+    
+        // [可选调试] 检查找到的 aiDiv 是否确实在 chatHistoryEl 中 (通常是)
+        // if (aiDiv && !chatHistoryEl.contains(aiDiv)) {
+        //     console.warn(`[chat_stream_end] Found aiDiv for ${data.request_id}, but it's not a descendant of chatHistoryEl.`);
+        // }
+    
+        // 如果没找到，就创建一个新的 div
+        if (!aiDiv) {
+            console.warn(`[chat_stream_end] No message div found for ${data.request_id}. Usually expected if streaming started before UI update. Creating one now.`);
+            // 移除可能仍然存在的 thinking 指示器 (以防万一)
             const thinkingDiv = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${data.request_id}"]`);
             if (thinkingDiv) removeThinkingIndicator(chatHistoryEl, thinkingDiv);
-        }
-        processAIMessage(aiDiv, data.full_message || '');
-        scrollToChatBottom(chatHistoryEl);
-
-        let activeSession = chatSessions.find(s => s.id === (data.session_id || currentChatSessionId));
-        if (activeSession) {
-            const finalMessageText = data.full_message || '';
-            const tempMsgIndex = activeSession.history.findIndex(msg => msg.temp_id === data.request_id);
-            if (tempMsgIndex > -1) {
-                activeSession.history[tempMsgIndex] = { role: 'model', parts: [{ text: finalMessageText }], provider: data.provider || 'AI' };
-                delete activeSession.history[tempMsgIndex].temp_id;
-            } else { // If no temp message, means it might be a new message or an orphaned stream_end
-                 const existingMsgIndex = activeSession.history.findIndex(msg => msg.role === 'model' && msg.parts[0].text === finalMessageText && msg.provider === (data.provider || 'AI'));
-                 if(existingMsgIndex === -1) { // Only add if not exactly identical to an existing one
-                    activeSession.history.push({ role: 'model', parts: [{ text: finalMessageText }], provider: data.provider || 'AI' });
-                 }
-            }
-            saveChatSessionsToStorage();
-        }
-    });
     
-    socket.on('stt_result', (data) => { debugLog(`Received 'stt_result': ${JSON.stringify(data)}`); });
-    socket.on('voice_chat_response', (data) => {
-        debugLog(`Received 'voice_chat_response': ${JSON.stringify(data)}`);
-        const voiceResultEl = document.getElementById('voice-result');
-        if (voiceResultEl && data) {
-            const transcript = data.transcript || '无法识别'; const aiResponseText = data.message || '无回答';
-            const transcriptHtml = `<div style="margin-bottom:0.5rem;"><strong><i class="fas fa-comment-dots"></i> 识别结果:</strong> <span class="message-content-simple">${escapeHtml(transcript)}</span></div>`;
-            const aiResponseHtml = `<div><strong><i class="fas fa-robot"></i> AI回答:</strong> <div class="message-content" id="voice-ai-response-content"></div></div>`;
-            voiceResultEl.innerHTML = `${transcriptHtml}<hr>${aiResponseHtml}`;
-            const voiceAiRespContentEl = document.getElementById('voice-ai-response-content');
-            if (voiceAiRespContentEl) processAIMessage(voiceAiRespContentEl, aiResponseText); // Use processAIMessage
-            addVoiceHistoryItem({ transcript: transcript, response: aiResponseText });
+            aiDiv = document.createElement('div');
+            aiDiv.className = 'ai-message'; // 基础类名
+            aiDiv.dataset.requestId = data.request_id; // 绑定 request ID
+            if (data.provider) { // 如果服务器提供了 provider 信息
+                aiDiv.dataset.provider = data.provider;
+            }
+            
+            // 将新创建的 div 添加到聊天记录的末尾
+            if (typeof chatHistoryEl.appendChild === 'function') {
+                chatHistoryEl.appendChild(aiDiv);
+            } else {
+                console.error("[chat_stream_end] Critical: chatHistoryEl is not a valid DOM element to append to.");
+                return; // 无法添加，后续处理无意义
+            }
         }
-        const startBtn = document.getElementById('voice-start-recording'); const stopBtn = document.getElementById('voice-stop-recording');
-        if (startBtn) startBtn.disabled = false; if (stopBtn) stopBtn.disabled = true;
+        // --- aiDiv 查找或创建结束 ---
+    
+        // 1. 更新界面显示 (调用 processAIMessage)
+        // 确保 aiDiv 是一个有效的 HTML 元素
+        if (aiDiv instanceof HTMLElement) {
+            // processAIMessage 会处理 Markdown, KaTeX 等，并放入 aiDiv
+            processAIMessage(aiDiv, data.full_message || '', "chat_stream_end");
+        } else {
+            console.error(`[chat_stream_end] aiDiv for ${data.request_id} is not a valid HTMLElement after find/create. Skipping UI update.`);
+            // 如果 aiDiv 无效，后续保存历史可能仍需进行，取决于你的策略
+        }
+    
+        // 2. 滚动到底部
+        scrollToChatBottom(chatHistoryEl);
+    
+        // 3. **** 更新 localStorage 中的聊天历史 ****
+        const activeSessionId = data.session_id || currentChatSessionId; // 优先使用服务器返回的 session_id
+        if (activeSessionId) {
+            const sessionToUpdate = chatSessions.find(s => s.id === activeSessionId);
+            if (sessionToUpdate) {
+                const messageIndex = sessionToUpdate.history.findIndex(
+                    // 查找内存中对应的AI消息占位符
+                    msg => msg.role === 'model' && msg.temp_id === data.request_id
+                );
+    
+                if (messageIndex !== -1) {
+                    // 更新找到的消息内容
+                    sessionToUpdate.history[messageIndex].parts = [{ text: data.full_message || '' }];
+                    if (data.provider) { // 如果服务器返回 provider 信息
+                        sessionToUpdate.history[messageIndex].provider = data.provider;
+                    }
+                    delete sessionToUpdate.history[messageIndex].temp_id; // 移除临时ID
+    
+                    console.log(`[History] Updated AI message in session ${activeSessionId} for request ${data.request_id} (via stream)`);
+                    saveChatSessionsToStorage(); // <--- 保存更新后的 chatSessions 到 localStorage
+                } else {
+                    // 虽然在界面上显示了消息，但在内存的 history 数组中没找到对应的占位符
+                    // 这通常不应该发生，除非 sendChatMessage 中添加占位符失败，或者 request_id/session_id 逻辑有误
+                    console.warn(`[History] Could not find placeholder AI message for request ${data.request_id} in session ${activeSessionId} to update (via stream). History might be inconsistent.`);
+                }
+            } else {
+                // 内存中找不到对应的会话 ID
+                console.warn(`[History] Could not find session ${activeSessionId} to update AI message (via stream).`);
+            }
+        } else {
+            // 无法确定当前会话 ID
+            console.warn("[History] No active session ID found to update AI message history (via stream).");
+        }
+    }); // chat_stream_end 回调结束
+
+    socket.on('voice_answer', function(data) {
+        console.log('[Socket] Received voice answer:', data);
+        const audioPlayer = document.getElementById('voice-answer-player');
+        const audioSource = document.getElementById('voice-answer-source');
+
+        if (audioPlayer && audioSource && data.audio_url) {
+            audioSource.src = data.audio_url;
+            audioPlayer.load();
+            audioPlayer.style.display = 'block';
+            audioPlayer.play().catch(err => console.error('[Voice] Playback error:', err));
+        }
     });
-    socket.on('stt_error', (errorData) => { console.error("STT Error:", errorData); alert(`语音识别失败: ${errorData.error || '未知错误'}`); const s=document.getElementById('voice-start-recording'),t=document.getElementById('voice-stop-recording');if(s)s.disabled=false;if(t)t.disabled=true; if(document.getElementById('voice-result'))document.getElementById('voice-result').textContent=`语音识别失败: ${errorData.error||'未知错误'}`; });
-    socket.on('chat_error', (errorData) => {
-        console.error(`[Socket] Received 'chat_error':`, errorData);
+
+    socket.on('chat_error', function(data) {
+        console.error('[Socket] Chat error:', data.message);
         const chatHistoryEl = document.getElementById('chat-chat-history');
-        const thinkingDiv = errorData.request_id 
-            ? chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${errorData.request_id}"]`) 
-            : chatHistoryEl?.querySelector('.ai-thinking');
-        if (thinkingDiv) { removeThinkingIndicator(chatHistoryEl, thinkingDiv); }
+        if (!chatHistoryEl) return;
 
-        const isChatTabActive = document.getElementById('ai-chat')?.classList.contains('active');
-        const isCurrentSession = currentChatSessionId === errorData.session_id || (!errorData.session_id && isChatTabActive);
-        if (chatHistoryEl && isCurrentSession) {
-            const errorDiv = document.createElement('div'); errorDiv.className = 'ai-message error-message';
-            errorDiv.innerHTML = `<strong>系统错误:</strong> <span>处理消息失败: ${escapeHtml(errorData.message || '未知错误')}</span>`;
-            chatHistoryEl.appendChild(errorDiv); scrollToChatBottom(chatHistoryEl);
-        }
-        // Voice tab error handling
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'system-message';
+        errorDiv.textContent = 'Error: ' + (data.message || 'An error occurred while processing your request.');
+        chatHistoryEl.appendChild(errorDiv);
+        scrollToChatBottom(chatHistoryEl);
     });
-    socket.on('task_error', (errorData) => { console.error("Task Error:", errorData); alert(`后台任务出错: ${errorData.error}`);});
+}
 
-} // End of initSocketIO
 
+ // End of initSocketIO
+
+// --- Chat Message Sending ---
+// --- Chat Message Sending ---
 // --- Chat Message Sending ---
 function sendChatMessage() {
     const chatInputEl = document.getElementById('chat-chat-input');
-    const chatHistoryEl = document.getElementById('chat-chat-history');
+    const chatHistoryEl = document.getElementById('chat-chat-history'); // 定义在这里，后面也能访问
+
+    if (!socket || !socket.connected) {
+        console.error('[Chat] Socket not connected, cannot send message');
+        // 可以在这里给用户一个提示，比如一个短暂的弹出消息或状态栏更新
+        return;
+    }
+
     if (!chatInputEl || !chatHistoryEl) { console.error("Chat input or history missing."); return; }
     const message = chatInputEl.value.trim();
-    const currentFileToSend = uploadedFile;
-    if (!message && !currentFileToSend) { debugLog("Empty message/file."); return; }
+    const currentFileToSend = uploadedFile; // 获取暂存的文件
+    if (!message && !currentFileToSend) { debugLog("Empty message and no file selected."); return; }
 
+    // 查找或创建当前会话
     let activeSession = currentChatSessionId ? chatSessions.find(s => s.id === currentChatSessionId) : null;
     if (!activeSession) {
         const newId = Date.now();
-        let title = message.substring(0,30) || (currentFileToSend ? `含${currentFileToSend.name.substring(0,20)}的对话` : '新对话');
-        if((message.length>30&&title.length===30)||(currentFileToSend&&currentFileToSend.name.length>20&&title.length>=22))title+="...";
-        activeSession={id:newId,title:escapeHtml(title),history:[]}; chatSessions.unshift(activeSession); addChatHistoryItem(activeSession); currentChatSessionId=newId;
-        setTimeout(()=>{const l=document.getElementById('chat-session-list');l?.querySelectorAll('.active-session').forEach(i=>i.classList.remove('active-session'));l?.querySelector(`[data-session-id="${activeSession.id}"]`)?.classList.add('active-session');if(chatHistoryEl.querySelector(".system-message"))chatHistoryEl.innerHTML='';},0);
+        let title = message.substring(0, 30) || (currentFileToSend ? `含${currentFileToSend.name.substring(0, 20)}的对话` : '新对话');
+        if ((message.length > 30 && title.length === 30) || (currentFileToSend && currentFileToSend.name.length > 20 && title.length >= 22)) title += "...";
+        activeSession = { id: newId, title: escapeHtml(title), history: [] };
+        chatSessions.unshift(activeSession); // 添加到会话列表顶部
+        addChatHistoryItem(activeSession); // 更新左侧会话列表UI
+        currentChatSessionId = newId; // 设置为当前活动会话
+        saveCurrentChatSessionId(); // 保存当前会话ID到localStorage
+        // 激活新会话的显示
+        setTimeout(() => {
+            const l = document.getElementById('chat-session-list');
+            l?.querySelectorAll('.active-session').forEach(i => i.classList.remove('active-session'));
+            l?.querySelector(`[data-session-id="${activeSession.id}"]`)?.classList.add('active-session');
+            if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = ''; // 清除初始提示
+        }, 0);
     }
-    const histMsgTxt = message || (currentFileToSend?`[用户上传了文件: ${currentFileToSend.name}]`:"");
-    if(histMsgTxt || currentFileToSend) activeSession.history.push({role:'user',parts:[{text:histMsgTxt}]});
-    
-    const uDiv=document.createElement('div'); uDiv.className='user-message';
-    const uStrong = document.createElement('strong'); uStrong.textContent="您: "; uDiv.appendChild(uStrong);
-    const uMsgContentDiv=document.createElement('div'); uMsgContentDiv.className='message-content';
-    uMsgContentDiv.textContent = message; // User message as plain text
-    if(currentFileToSend){
-        const fD=document.createElement('div');fD.className='attached-file';
-        fD.innerHTML=`<i class="fas fa-paperclip"></i> ${escapeHtml(currentFileToSend.name)} (${formatFileSize(currentFileToSend.size)})`;
-        if(message) uMsgContentDiv.appendChild(document.createElement('br'));
+
+    // 将用户消息添加到内存中的历史记录
+    const histMsgTxt = message || (currentFileToSend ? `[用户上传了文件: ${currentFileToSend.name}]` : "");
+    // 确保 activeSession 存在 (理论上在上面已确保)
+    if (activeSession && (histMsgTxt || currentFileToSend)) {
+         activeSession.history.push({ role: 'user', parts: [{ text: histMsgTxt }] });
+    } else if (!activeSession) {
+         console.error("[sendChatMessage] Critical error: activeSession is null when trying to push user message.");
+         return; // 避免后续错误
+    }
+
+    // 更新UI显示用户消息
+    const uDiv = document.createElement('div'); uDiv.className = 'user-message';
+    const uStrong = document.createElement('strong'); uStrong.textContent = "您: "; uDiv.appendChild(uStrong);
+    const uMsgContentDiv = document.createElement('div'); uMsgContentDiv.className = 'message-content';
+    uMsgContentDiv.textContent = message;
+    if (currentFileToSend) {
+        const fD = document.createElement('div'); fD.className = 'attached-file';
+        fD.innerHTML = `<i class="fas fa-paperclip"></i> ${escapeHtml(currentFileToSend.name)} (${formatFileSize(currentFileToSend.size)})`;
+        if (message) uMsgContentDiv.appendChild(document.createElement('br'));
         uMsgContentDiv.appendChild(fD);
     }
     uDiv.appendChild(uMsgContentDiv);
-    if(chatHistoryEl.querySelector(".system-message"))chatHistoryEl.innerHTML='';
-    chatHistoryEl.appendChild(uDiv);
+    if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = ''; // 如果是第一条消息，清除提示
+    chatHistoryEl.appendChild(uDiv); // 添加用户消息到聊天窗口
 
-    const reqId = generateUUID();
+    const reqId = generateUUID(); // 为本次请求生成唯一ID
     console.log(`[sendChatMessage] Generated reqId: ${reqId}`);
+
+    // 显示“思考中”指示器
     const thinkingDiv = document.createElement('div');
     thinkingDiv.className = 'ai-message ai-thinking';
-    thinkingDiv.dataset.requestId = reqId;
+    thinkingDiv.dataset.requestId = reqId; // 绑定请求ID，方便后续移除
     thinkingDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> AI正在思考...';
     chatHistoryEl.appendChild(thinkingDiv);
-    scrollToChatBottom(chatHistoryEl);
+    scrollToChatBottom(chatHistoryEl); // 滚动到底部
 
-    activeSession.history.push({ role: 'model', parts: [{text:''}], temp_id: reqId, provider: 'AI' });
-
-    const streamToggle=document.getElementById('streaming-toggle-checkbox');
-    const stream=streamToggle?streamToggle.checked:true;
-    let histToSend=JSON.parse(JSON.stringify(activeSession.history.slice(0, -1))); 
-
-    if(currentFileToSend){
-        const fd=new FormData();fd.append('prompt',message);fd.append('file',currentFileToSend,currentFileToSend.name);
-        fd.append('history',JSON.stringify(histToSend));fd.append('use_streaming',stream); 
-        fd.append('session_id',activeSession.id);fd.append('request_id',reqId);
-        fetch('/chat_with_file',{method:'POST',headers:{'Authorization':`Bearer ${TOKEN}`},body:fd})
-        .then(r=>{if(!r.ok)return r.json().catch(()=>({error:`HTTP ${r.status}`})).then(eD=>{throw new Error(eD.message||eD.error||`HTTP ${r.status}`)});return r.json();})
-        .then(d=>{
-            if(d && d.request_id === reqId) {
-                if (!stream && d.message) {
-                    // Call the socket chat_response handler for consistency
-                    socket.emit('chat_response', { message:d.message, provider:d.provider, request_id:d.request_id, session_id:activeSession.id, full_message: d.message });
-                } else if (stream) { debugLog("File upload ack for streaming, Req ID: "+d.request_id); }
-                else if (!d.message && !stream) {
-                    const currentThinkingDiv = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
-                    removeThinkingIndicator(chatHistoryEl, currentThinkingDiv);
-                }
-            } else {
-                const currentThinkingDiv = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
-                removeThinkingIndicator(chatHistoryEl, currentThinkingDiv);
-            }
-        })
-        .catch(e=>{
-            console.error('Chat w/ file err:',e);
-            const currentThinkingDiv = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
-            removeThinkingIndicator(chatHistoryEl, currentThinkingDiv);
-            const errD=document.createElement('div');errD.className='ai-message error-message';errD.innerHTML=`<strong>系统错误:</strong><span>发送失败:${escapeHtml(e.message)}</span>`;chatHistoryEl.appendChild(errD);scrollToChatBottom(chatHistoryEl);
-        });
+    // 向内存中的历史记录添加AI回复的占位符 (文本为空，但有temp_id)
+    if (activeSession) { // 再次确认 activeSession 存在
+        activeSession.history.push({ role: 'model', parts: [{ text: '' }], temp_id: reqId, provider: 'AI' });
     } else {
-        socket.emit('chat_message',{prompt:message,history:histToSend,request_id:reqId,use_streaming:stream,session_id:activeSession.id});
+         console.error("[sendChatMessage] Critical error: activeSession is null when trying to push model placeholder.");
+         // 可能需要移除 thinkingDiv 并提示错误
+         if(thinkingDiv.parentNode === chatHistoryEl) chatHistoryEl.removeChild(thinkingDiv);
+         return;
     }
-    saveChatSessionsToStorage();
-    chatInputEl.value='';const upPrevEl=document.getElementById('chat-upload-preview');if(upPrevEl)upPrevEl.innerHTML='';uploadedFile=null;const fInEl=document.getElementById('chat-file-upload');if(fInEl)fInEl.value='';
-}
 
+    const streamToggle = document.getElementById('streaming-toggle-checkbox');
+    const stream = streamToggle ? streamToggle.checked : true; // 获取流式输出设置
+
+    // 准备发送给后端的历史记录 (不包含最后一条 AI 占位符)
+    let histToSend = activeSession ? JSON.parse(JSON.stringify(activeSession.history.slice(0, -1))) : [];
+
+    // 根据是否有文件决定请求方式
+    if (currentFileToSend) {
+        // --- 带文件上传：使用 fetch 请求 /chat_with_file ---
+        const fd = new FormData();
+        fd.append('prompt', message);
+        fd.append('file', currentFileToSend, currentFileToSend.name);
+        fd.append('history', JSON.stringify(histToSend));
+        fd.append('use_streaming', stream); // 后端会根据这个决定行为吗？(当前后端实现似乎没用这个)
+        fd.append('session_id', activeSession.id);
+        fd.append('request_id', reqId); // 发送前端生成的 reqId
+
+        console.log('DEBUG: Fetching /chat_with_file with Authorization Header:', `Bearer ${TOKEN}`); 
+
+        fetch('/chat_with_file', { method: 'POST', headers: { 'Authorization': `Bearer ${TOKEN}` }, body: fd })
+            .then(r => { // 处理 HTTP 响应头
+                if (!r.ok) { // 如果 HTTP 状态码不是 2xx
+                    // 尝试解析 JSON 错误体，若失败则用状态文本构造错误
+                    return r.json().catch(() => ({ error: `HTTP Error: ${r.status} ${r.statusText}` }))
+                               .then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
+                }
+                return r.json(); // 解析成功的 JSON 响应体
+            })
+            .then(d => { // 处理来自 /chat_with_file 的确认响应 {status, message, request_id}
+                // 检查响应内容是否符合预期，且 request_id 是否与我们发送的一致
+                if (d && d.request_id === reqId && d.status === 'processing') {
+                    // 服务器已接受请求，后台任务已开始
+                    console.log(`[File Upload] Request ${reqId} accepted by server. Status: ${d.status}. Waiting for Socket.IO response.`);
+                    // “思考中”指示器保持显示，等待后续 Socket.IO 事件 (如 chat_stream_end 或 analysis_result)
+                    // 不需要在这里更新UI或保存历史，依赖 Socket.IO 处理器完成
+                } else {
+                    // 服务器确认响应无效或 request_id 不匹配
+                    console.warn('[File Upload] Server acknowledgment error or request_id mismatch.', d);
+                    const currentThinkingDivMismatch = chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
+                    if (currentThinkingDivMismatch) removeThinkingIndicator(chatHistoryEl, currentThinkingDivMismatch);
+                    // 显示错误给用户
+                    const errD = document.createElement('div');
+                    errD.className = 'ai-message error-message';
+                    errD.innerHTML = `<strong>系统错误:</strong><span>服务器未能确认处理文件请求。</span>`;
+                    if (chatHistoryEl) {
+                        chatHistoryEl.appendChild(errD);
+                        scrollToChatBottom(chatHistoryEl);
+                    }
+                    // 清理历史记录中的AI占位符
+                    if (activeSession) {
+                        const messageIndex = activeSession.history.findIndex(msg => msg.role === 'model' && msg.temp_id === reqId);
+                        if (messageIndex !== -1) {
+                            activeSession.history.splice(messageIndex, 1);
+                            saveChatSessionsToStorage(); // 保存清理后的历史
+                            console.log(`[History] Removed placeholder AI message for unacknowledged request ${reqId}`);
+                        }
+                    }
+                }
+            })
+            .catch(e => { // fetch 调用本身失败 (网络错误, 404, 500 等)
+                console.error('Chat w/ file fetch error:', e);
+                const currentThinkingDivError = chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
+                if (currentThinkingDivError) removeThinkingIndicator(chatHistoryEl, currentThinkingDivError);
+
+                const errD = document.createElement('div');
+                errD.className = 'ai-message error-message';
+                errD.innerHTML = `<strong>系统错误:</strong><span>文件上传请求失败: ${escapeHtml(e.message)}</span>`;
+                if (chatHistoryEl) {
+                    chatHistoryEl.appendChild(errD);
+                    scrollToChatBottom(chatHistoryEl);
+                }
+                // 清理历史记录中的AI占位符
+                if (activeSession) {
+                    const messageIndex = activeSession.history.findIndex(msg => msg.role === 'model' && msg.temp_id === reqId);
+                    if (messageIndex !== -1) {
+                        activeSession.history.splice(messageIndex, 1);
+                        saveChatSessionsToStorage(); // 保存清理后的历史
+                        console.log(`[History] Removed placeholder AI message for failed fetch request ${reqId}`);
+                    }
+                }
+            });
+    } else {
+        // --- 不带文件：使用 Socket.IO 发送 chat_message 事件 ---
+        socket.emit('chat_message', {
+            prompt: message,
+            history: histToSend,
+            request_id: reqId,
+            use_streaming: stream, // 告知服务器是否期望流式响应
+            session_id: activeSession.id
+        });
+        // AI 的响应将通过 chat_stream_chunk 和 chat_stream_end 事件到达
+        // 务必确保 chat_stream_end 处理器会更新并保存历史记录
+    }
+
+    // 不论请求方式如何，都在添加用户消息和AI占位符后立即保存一次
+    // 这确保了即使浏览器意外关闭，用户输入和AI思考状态也能恢复
+    if (activeSession) {
+        saveChatSessionsToStorage();
+    }
+
+    // 清空输入框和文件预览区
+    chatInputEl.value = '';
+    const upPrevEl = document.getElementById('chat-upload-preview'); if (upPrevEl) upPrevEl.innerHTML = ''; uploadedFile = null;
+    const fInEl = document.getElementById('chat-file-upload'); if (fInEl) fInEl.value = '';
+}
 // --- Image Overlay & Cropping ---
 function hideImageOverlay(){
     const o=document.getElementById('overlay'); if(o)o.style.display='none';
@@ -556,7 +778,7 @@ function renderChatHistory(historyArray) { /* ... (render chat history, use proc
         } else if(role==='model'){
             msgDiv.className='ai-message';
             // processAIMessage will add the strong tag and contentDiv internally
-            processAIMessage(msgDiv, text);
+            processAIMessage(msgDiv, text, "history_load"); // <--- 标记来源
         } else { 
             msgDiv.className='system-message'; // Or some other class
             const strongTag=document.createElement('strong'); strongTag.textContent = `${role}: `; msgDiv.appendChild(strongTag);
@@ -593,7 +815,49 @@ function sendVoiceToServer(audioBlob) { /* ... (send voice to server logic) ... 
 function requestScreenshot(){if(socket?.connected)socket.emit('request_screenshot_capture');else alert('无法请求截图：未连接');}
 
 // --- Initialization Functions for Features & Event Handlers ---
-function initBaseButtonHandlers(){
+function initBaseButtonHandlers() {
+    // --- Test Render Button ---
+    document.getElementById('test-render-btn')?.addEventListener('click', () => {
+        const chatHistoryEl = document.getElementById('chat-chat-history');
+        if (!chatHistoryEl) return;
+        if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+        const testMsgDiv = document.createElement('div');
+        testMsgDiv.className = 'ai-message';
+        const testMD = "### Test MD\n\n- List\n- KaTeX: $E=mc^2$ and $$\\sum_{i=0}^n i^2 = \\frac{n(n+1)(2n+1)}{6}$$";
+        processAIMessage(testMsgDiv, testMD, "test_button"); // <--- 标记来源
+        chatHistoryEl.appendChild(testMsgDiv);
+        scrollToChatBottom(chatHistoryEl);
+    });
+
+    // --- Other button handlers ---
+    document.getElementById('clear-chat-btn')?.addEventListener('click', () => {
+        const chatHistoryEl = document.getElementById('chat-chat-history');
+        if (chatHistoryEl) chatHistoryEl.innerHTML = '';
+    });
+
+    document.getElementById('copy-last-msg-btn')?.addEventListener('click', () => {
+        const lastMsg = document.querySelector('#chat-chat-history .message-content:last-child');
+        if (lastMsg) {
+            navigator.clipboard.writeText(lastMsg.textContent).then(() => {
+                console.log('[Clipboard] Copied last message');
+            }).catch(err => {
+                console.error('[Clipboard] Copy failed:', err);
+            });
+        }
+    });
+
+    document.getElementById('screenshot-btn')?.addEventListener('click', () => {
+        html2canvas(document.getElementById('chat-chat-history')).then(canvas => {
+            const link = document.createElement('a');
+            link.download = 'chat_screenshot.png';
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }).catch(err => {
+            console.error('[Screenshot] Error:', err);
+        });
+    });
+
+    // --- 保留原始的事件监听器 ---
     document.getElementById('close-overlay')?.addEventListener('click', hideImageOverlay);
     document.getElementById('confirm-selection')?.addEventListener('click', confirmCrop);
     document.getElementById('cancel-selection')?.addEventListener('click', hideImageOverlay);
@@ -663,25 +927,61 @@ function saveCurrentChatSessionId() {
 }
 
 // --- Main Initialization ---
+
+
 function initAllFeatures() {
     console.log("--- Initializing All Features ---");
     const tokenMeta = document.querySelector('meta[name="token"]');
-    if (tokenMeta?.content) TOKEN = tokenMeta.content; else console.warn('Token meta tag missing.');
-    console.log('[KaTeX] Initial check for renderMathInElement at page load:', typeof window.renderMathInElement);
-    if (document.querySelector('script[src*="katex"][src*="auto-render.min.js"]')) {
-        console.log('[KaTeX] auto-render.min.js script tag is present in HTML.');
-    }
+    if (tokenMeta?.content) TOKEN = tokenMeta.content;
+    else console.warn('Token meta tag missing.');
 
     initMarkdownRenderer();
-    initBaseButtonHandlers(); // MUST BE DEFINED BEFORE THIS
+
+    // KaTeX JS 和 CSS 已经通过 import 导入，renderMathInElement 函数现在可以直接使用。
+    // 我们可以在这里渲染页面加载时已经存在的任何包含 LaTeX 的内容。
+    // console.log('[KaTeX] renderMathInElement is available via import. Rendering existing content.'); // 可选的调试日志
+    document.querySelectorAll('.message-content').forEach(renderLatexInElement);
+
+    initBaseButtonHandlers();
     initTabs();
     initScreenshotAnalysisHandlers();
     initAiChatHandlers();
     initVoiceAnswerHandlers();
     initSocketIO();
-    
+
     console.log("--- Application initialization complete ---");
 }
 
+
 document.addEventListener('DOMContentLoaded', initAllFeatures);
-document.addEventListener('DOMContentLoaded', ()=>{ const btns=document.querySelectorAll('button,.btn,.tab-item');btns.forEach(b=>{let touchTimer;const clearTimer=()=>{if(touchTimer){clearTimeout(touchTimer);touchTimer=null;this.classList.remove('touch-active');}};b.addEventListener('touchstart',function(){this.classList.add('touch-active');touchTimer=setTimeout(clearTimer,300);},{passive:true});b.addEventListener('touchend',clearTimer);b.addEventListener('touchcancel',clearTimer);});if(!document.querySelector('style#touch-active-style')){const s=document.createElement('style');s.id='touch-active-style';s.textContent='.touch-active{opacity:0.7 !important; transform:scale(0.98) !important;}';document.head.appendChild(s);}});
+
+// 按钮触摸效果的 DOMContentLoaded 监听器
+document.addEventListener('DOMContentLoaded', ()=>{
+    const btns=document.querySelectorAll('button,.btn,.tab-item');
+    btns.forEach(b=>{
+        let touchTimer;
+        const clearTimer=()=>{
+            if(touchTimer){
+                clearTimeout(touchTimer);
+                touchTimer=null;
+                // 'this' 在箭头函数中可能指向外部作用域，取决于 clearTimer 如何被调用
+                // 如果是作为事件监听器回调，普通函数可能更合适以确保 'this' 指向按钮
+                // 但既然您用了 this.classList.remove，它在特定调用下应该能工作
+                b.classList.remove('touch-active'); // 直接用 b 更安全
+            }
+        };
+        b.addEventListener('touchstart',function(){ // 用普通函数确保 this 指向 b
+            this.classList.add('touch-active');
+            touchTimer=setTimeout(() => clearTimer(), 300); // 确保 clearTimer 能访问 b
+        },{passive:true});
+        b.addEventListener('touchend', () => clearTimer()); // 确保 clearTimer 能访问 b
+        b.addEventListener('touchcancel', () => clearTimer()); // 确保 clearTimer 能访问 b
+    });
+    if(!document.querySelector('style#touch-active-style')){
+        const s=document.createElement('style');
+        s.id='touch-active-style';
+        s.textContent='.touch-active{opacity:0.7 !important; transform:scale(0.98) !important;}';
+        document.head.appendChild(s);
+    }
+});
+
