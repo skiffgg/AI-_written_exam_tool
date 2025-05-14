@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = Field(default=None, validation_alias='GEMINI_API_KEY')
 
     # --- 功能配置 ---
-    image_analysis_provider: str = Field(default="openai", validation_alias='IMAGE_ANALYSIS_PROVIDER')
+    image_analysis_provider: str = Field(default="gemini", validation_alias='IMAGE_ANALYSIS_PROVIDER')
 
     # --- 调试模式 ---
     debug_mode: bool = Field(default=False, validation_alias='DEBUG_MODE')

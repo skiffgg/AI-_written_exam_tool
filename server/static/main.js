@@ -15,7 +15,8 @@ import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
 // 你可以选择一个你喜欢的主题。这里以 'github.min.css' 为例，与你之前 CDN 使用的一致。
 // 如果你想使用其他主题，请相应修改路径。
-import 'highlight.js/styles/github.min.css';
+// import 'highlight.js/styles/github.min.css';
+import 'highlight.js/styles/atom-one-dark.min.css'; // 引入新的 atom-one-dark 主题
 
 let TOKEN = '';
 let selection = { x: 0, y: 0, width: 0, height: 0 };
@@ -230,7 +231,7 @@ function processAIMessage(messageElement, messageText, sourceEvent = "unknown") 
     const streamingSpan = messageElement.querySelector('.ai-response-text-streaming');
 
     if (streamingSpan) {
-        console.log(`[KaTeX Debug from ${sourceEvent}] Removing streamingSpan for message:`, String(messageText || "").substring(0, 50) + "...");
+        // console.log(`[KaTeX Debug from ${sourceEvent}] Removing streamingSpan for message:`, String(messageText || "").substring(0, 50) + "...");
         streamingSpan.remove();
     }
 
@@ -245,45 +246,197 @@ function processAIMessage(messageElement, messageText, sourceEvent = "unknown") 
     }
     contentDiv.innerHTML = ''; // 清空内容，为新的渲染做准备
 
-    // 将原始消息文本转换为字符串并进行统一预处理
     let textToRender = String(messageText || "");
     
     if (typeof preprocessTextForRendering === 'function') {
         textToRender = preprocessTextForRendering(textToRender);
     } else {
-        // 如果函数缺失，可以给一个警告，避免静默失败
         console.warn("Warning: preprocessTextForRendering function is not defined. Text preprocessing skipped.");
     }
 
-    // 使用经过预处理的文本进行 Markdown 渲染
     if (md && typeof md.render === 'function') {
         contentDiv.innerHTML = md.render(textToRender);
     } else {
-        contentDiv.innerHTML = escapeHtml(textToRender).replace(/\n/g, '<br>');
+        if (typeof escapeHtml === 'function') {
+            contentDiv.innerHTML = escapeHtml(textToRender).replace(/\n/g, '<br>');
+        } else { // 极端的 fallback
+            console.error("escapeHtml function is not defined! Displaying raw text.");
+            const tempP = document.createElement('p');
+            tempP.textContent = textToRender;
+            contentDiv.appendChild(tempP);
+        }
     }
 
-    // --- 日志代码可以保持不变，或者按需调整 ---
-    // 例如，确保 "Raw messageText passed to markdown-it:" 仍然是你期望记录的原始或中间状态的文本
-    // 而 "contentDiv HTML BEFORE KaTeX render:" 会显示最终的、将要给 KaTeX 处理的 HTML
+    // --- 添加复制代码按钮的逻辑 START ---
+    const codeBlocks = contentDiv.querySelectorAll('pre > code'); // 更精确地选择 highlight.js 生成的结构
+    codeBlocks.forEach(codeBlock => {
+        const preElement = codeBlock.parentElement; // 获取父元素 <pre>
+        if (preElement) {
+            // 确保 pre 元素是相对定位的 (最好在 CSS 中设置 .message-content pre { position: relative; })
+            // if (getComputedStyle(preElement).position === 'static') {
+            // preElement.style.position = 'relative';
+            // }
+            // 从 style.css 中看到 .message-content pre 已经有 position: relative; 了，所以上面这块可以省略
+
+            // 检查是否已经有复制按钮，防止重复添加 (虽然innerHTML清空了，但以防万一)
+            if (preElement.querySelector('.copy-code-button')) {
+                return; 
+            }
+
+            const copyButton = document.createElement('button');
+            copyButton.className = 'copy-code-button'; // 应用CSS样式
+            copyButton.innerHTML = '<i class="fas fa-copy"></i>'; // Font Awesome 复制图标
+            copyButton.title = '复制到剪贴板';
+            copyButton.setAttribute('aria-label', '复制到剪贴板'); // 增强可访问性
+
+            copyButton.addEventListener('click', (event) => {
+                event.stopPropagation(); // 防止点击按钮时触发其他可能绑定在 pre 或 message 上的事件
+
+                const codeToCopy = codeBlock.textContent || ""; 
+                if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                    navigator.clipboard.writeText(codeToCopy).then(() => {
+                        copyButton.innerHTML = '<i class="fas fa-check"></i>'; // 已复制图标
+                        copyButton.classList.add('copied');
+                        setTimeout(() => {
+                            copyButton.innerHTML = '<i class="fas fa-copy"></i>'; // 恢复原图标
+                            copyButton.classList.remove('copied');
+                        }, 2000);
+                    }).catch(err => {
+                        console.error('无法复制到剪贴板:', err);
+                        copyButton.textContent = '失败';
+                        copyButton.classList.add('copy-failed'); // 可以定义一个 .copy-failed 样式
+                        setTimeout(() => {
+                            copyButton.innerHTML = '<i class="fas fa-copy"></i>';
+                            copyButton.classList.remove('copy-failed');
+                        }, 2000);
+                        // 作为后备方案，可以尝试传统的 execCommand('copy')，但它已不推荐
+                        // fallbackCopyTextToClipboard(codeToCopy, copyButton);
+                    });
+                } else {
+                    // 如果 navigator.clipboard 不可用 (例如在非 HTTPS 环境或非常旧的浏览器)
+                    console.warn('navigator.clipboard.writeText API 不可用。尝试后备复制方法。');
+                    fallbackCopyTextToClipboard(codeToCopy, copyButton); // 调用后备方法
+                }
+            });
+
+            preElement.appendChild(copyButton); // 将按钮添加到 <pre> 元素
+        }
+    });
+    // --- 添加复制代码按钮的逻辑 END ---
+
+    // --- 日志代码 (保持不变) ---
     if (sourceEvent === "chat_stream_end") {
         console.log(`%c[KaTeX Debug from ${sourceEvent}] FINAL KaTeX Processing:`, "color: blue; font-weight: bold;");
-        console.log("Original messageText for logs:", messageText); // 原始的、未处理的 messageText
-        console.log("Text after preprocessing (passed to md.render):", textToRender); // 经过统一预处理后的文本
-        console.log("contentDiv HTML BEFORE KaTeX render:", contentDiv.innerHTML);
+        console.log("Original messageText for logs:", messageText);
+        console.log("Text after preprocessing (passed to md.render):", textToRender);
+        console.log("contentDiv HTML AFTER adding copy buttons, BEFORE KaTeX render:", contentDiv.innerHTML);
     } else if (sourceEvent === "test_button") {
-        console.log(`%c[KaTeX Debug from ${sourceEvent}] TEST BUTTON KaTeX Processing:`, "color: green; font-weight: bold;");
-        console.log("Original messageText (testMD) for logs:", messageText);
-        console.log("Text after preprocessing (passed to md.render):", textToRender);
-        console.log("contentDiv HTML BEFORE KaTeX render (Test Button):", contentDiv.innerHTML);
-    } else if (sourceEvent === "history_load") {
-        console.log(`%c[KaTeX Debug from ${sourceEvent}] HISTORY LOAD KaTeX Processing:`, "color: orange; font-weight: bold;");
-        console.log("Original messageText (history) for logs:", messageText);
-        console.log("Text after preprocessing (passed to md.render):", textToRender);
-        console.log("contentDiv HTML BEFORE KaTeX render (History):", contentDiv.innerHTML);
+        // ... (其他日志分支)
+    } else if (sourceEvent === "history_load" || sourceEvent === "voice_chat_response" || sourceEvent === "new_screenshot_immediate_analysis" || sourceEvent === "analysis_result_update" || sourceEvent === "history_click_ss_analysis") {
+        // 合并其他 sourceEvent 的日志，避免过多分支
+        console.log(`%c[Render Debug from ${sourceEvent}] Processing:`, "color: purple;");
+        // console.log("Original messageText for logs:", messageText);
+        // console.log("Text after preprocessing (passed to md.render):", textToRender);
+        console.log("contentDiv HTML AFTER adding copy buttons, BEFORE KaTeX render:", contentDiv.innerHTML.substring(0, 300) + "..."); // 只打印部分HTML
     }
     // --- 日志代码结束 ---
 
-    renderLatexInElement(contentDiv);
+    // KaTeX 渲染应该在所有DOM操作（包括添加复制按钮）之后进行
+    if (typeof renderLatexInElement === 'function') {
+        renderLatexInElement(contentDiv);
+    } else {
+        console.warn("renderLatexInElement function is not defined. LaTeX rendering skipped.");
+    }
+}
+
+// --- 新的侧边栏切换初始化函数 ---
+function initSidebarToggle() {
+    const toggleButton = document.getElementById('toggle-sidebar-btn');
+    // 获取所有标签页下的 .main-content 元素
+    const mainContents = document.querySelectorAll('.tab-content > .main-content'); 
+    const leftPanels = document.querySelectorAll('.tab-content .left-panel'); // 用于检查初始状态
+
+    if (!toggleButton || mainContents.length === 0) {
+        console.warn("Sidebar toggle button or main content areas not found.");
+        return;
+    }
+
+    // (可选) 检查 localStorage 中是否有保存的侧边栏状态
+    let isSidebarCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
+
+    // 根据存储的状态初始化
+    function applySidebarState(collapsed) {
+        const icon = toggleButton.querySelector('i');
+        mainContents.forEach(content => {
+            if (collapsed) {
+                content.classList.add('sidebar-collapsed');
+            } else {
+                content.classList.remove('sidebar-collapsed');
+            }
+        });
+        if (icon) { // 改变按钮图标
+            icon.className = collapsed ? 'fas fa-bars' : 'fas fa-chevron-left'; // 或者 fa-align-justify / fa-align-left
+        }
+        // 更新 localStorage
+        localStorage.setItem('sidebarCollapsed', collapsed);
+        isSidebarCollapsed = collapsed; // 更新当前状态变量
+    }
+
+    // 初始化状态
+    applySidebarState(isSidebarCollapsed);
+
+
+    toggleButton.addEventListener('click', () => {
+        isSidebarCollapsed = !isSidebarCollapsed; // 切换状态
+        applySidebarState(isSidebarCollapsed);
+    });
+}
+
+// --- 后备的文本复制函数 (当 navigator.clipboard 不可用时) ---
+function fallbackCopyTextToClipboard(text, buttonElement) {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    
+    // 避免在屏幕上闪烁
+    textArea.style.top = "0";
+    textArea.style.left = "0";
+    textArea.style.position = "fixed";
+    
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    
+    let successful = false;
+    try {
+        successful = document.execCommand('copy');
+        if (successful) {
+            if (buttonElement) {
+                buttonElement.innerHTML = '<i class="fas fa-check"></i>';
+                buttonElement.classList.add('copied');
+                setTimeout(() => {
+                    buttonElement.innerHTML = '<i class="fas fa-copy"></i>';
+                    buttonElement.classList.remove('copied');
+                }, 2000);
+            }
+            console.log('后备复制成功');
+        } else {
+            throw new Error('document.execCommand("copy") failed');
+        }
+    } catch (err) {
+        console.error('后备复制失败:', err);
+        if (buttonElement) {
+            buttonElement.textContent = '失败';
+            buttonElement.classList.add('copy-failed');
+            setTimeout(() => {
+                buttonElement.innerHTML = '<i class="fas fa-copy"></i>';
+                buttonElement.classList.remove('copy-failed');
+            }, 2000);
+        }
+        // 可以提示用户手动复制
+        // alert('无法自动复制到剪贴板，请手动复制。');
+    }
+    
+    document.body.removeChild(textArea);
 }
 // --- Socket.IO Event Handlers & AI Message Processing ---
 function handleAiResponseMessage(data, isStreamEndOrFullMessage = false) {
@@ -300,13 +453,15 @@ function handleAiResponseMessage(data, isStreamEndOrFullMessage = false) {
 function initSocketIO() {
     socket = io({
         path: '/socket.io',
-        auth: { token: TOKEN }
+        auth: { token: TOKEN },
+        transports: ['websocket']
     });
 
     socket.on('connect', function() {
         console.log('[Socket] Connected to server');
         const statusEl = document.getElementById('connection-status');
         if (statusEl) statusEl.textContent = '已连接';
+        if (typeof getApiInfo === 'function') getApiInfo(); 
     });
 
     socket.on('connect_error', function(error) {
@@ -443,6 +598,279 @@ function initSocketIO() {
             console.warn("[History] No active session ID found to update AI message history (via stream).");
         }
     }); // chat_stream_end 回调结束
+
+    socket.on('chat_response', function(data) {
+    console.log('<<<<< [Socket RECEIVED] chat_response (NON-STREAMING) >>>>>', data);
+    const chatHistoryEl = document.getElementById('chat-chat-history');
+    if (!chatHistoryEl) {
+        console.error("[chat_response] Critical: chatHistoryEl (#chat-chat-history) not found.");
+        return;
+    }
+
+    // 1. 移除思考中指示器
+    // 假设你的思考指示器有 data-request-id="${data.request_id}" 并且 class 'ai-thinking'
+    const thinkingDiv = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${data.request_id}"]`);
+    if (thinkingDiv && typeof removeThinkingIndicator === 'function') {
+        removeThinkingIndicator(chatHistoryEl, thinkingDiv);
+    } else if (thinkingDiv) {
+        thinkingDiv.remove(); // 简单的移除
+        console.warn("removeThinkingIndicator function not found, used direct remove().");
+    }
+
+    // 2. 创建或找到用于显示AI回复的div
+    // 通常，对于非流式，我们可能不会预先创建占位div，而是直接追加新消息。
+    // 但如果你的 sendChatMessage 为非流式也创建了占位（例如 thinkingDiv 本身就是占位），则需要找到它。
+    // 这里我们假设直接创建一个新的AI消息div。
+    let aiDiv = chatHistoryEl.querySelector(`.ai-message[data-request-id="${data.request_id}"]:not(.ai-thinking)`);
+    if (!aiDiv) { // 如果流式逻辑意外地没有完全清理，或者没有占位符
+        aiDiv = document.createElement('div');
+        aiDiv.className = 'ai-message'; // 基础类名
+        aiDiv.dataset.requestId = data.request_id; // 绑定 request ID
+        chatHistoryEl.appendChild(aiDiv);
+    }
+    // 如果 aiDiv 已经存在（例如由 thinkingDiv 转换而来），确保它没有 streaming span
+    const streamingSpan = aiDiv.querySelector('.ai-response-text-streaming');
+    if (streamingSpan) streamingSpan.remove();
+
+
+    if (data.provider) { // 如果服务器提供了 provider 信息
+        aiDiv.dataset.provider = data.provider;
+    }
+    
+    // 3. 更新界面显示 (调用 processAIMessage)
+    // processAIMessage 会处理 Markdown, KaTeX 等，并放入 aiDiv
+    if (typeof processAIMessage === 'function') {
+        processAIMessage(aiDiv, data.message || 'AI未返回信息。', "chat_response_non_stream");
+    } else {
+        console.error("processAIMessage function is not defined! Cannot render AI message.");
+        // Fallback: display raw text if processAIMessage is missing
+        const tempContentDiv = document.createElement('div');
+        tempContentDiv.className = 'message-content';
+        tempContentDiv.textContent = data.message || 'AI未返回信息。 (Renderer missing)';
+        // 如果 aiDiv 还没有 provider strong 标签，可以简单添加
+        let strongTag = aiDiv.querySelector('strong');
+        if (!strongTag) {
+            strongTag = document.createElement('strong');
+            strongTag.textContent = `${data.provider || 'AI'}: `;
+            aiDiv.insertBefore(strongTag, aiDiv.firstChild);
+        }
+        aiDiv.appendChild(tempContentDiv);
+    }
+    
+    // 4. 滚动到底部
+    if (typeof scrollToChatBottom === 'function') {
+        scrollToChatBottom(chatHistoryEl);
+    }
+
+    // 5. 更新 localStorage 中的聊天历史 (与 chat_stream_end 中的逻辑非常相似)
+    // 假设 currentChatSessionId 和 chatSessions 是可访问的
+    const activeSessionId = data.session_id || currentChatSessionId; 
+    if (activeSessionId && typeof chatSessions !== 'undefined' && typeof saveChatSessionsToStorage === 'function') {
+        const sessionToUpdate = chatSessions.find(s => s.id === activeSessionId);
+        if (sessionToUpdate) {
+            // 查找内存中对应的AI消息占位符 (它应该有 temp_id)
+            const messageIndex = sessionToUpdate.history.findIndex(
+                msg => msg.role === 'model' && msg.temp_id === data.request_id 
+            );
+            if (messageIndex !== -1) {
+                sessionToUpdate.history[messageIndex].parts = [{ text: data.message || '' }];
+                if (data.provider) {
+                    sessionToUpdate.history[messageIndex].provider = data.provider;
+                }
+                delete sessionToUpdate.history[messageIndex].temp_id; // **非常重要：移除temp_id**
+                console.log(`[History] Updated AI message in session ${activeSessionId} for request ${data.request_id} (non-stream) and removed temp_id.`);
+                saveChatSessionsToStorage();
+            } else {
+                // 如果没有找到占位符，这可能表示 sendChatMessage 没有为非流式请求添加占位符
+                // 或者 request_id 管理仍有问题。
+                // 一个简化的处理可以是，如果找不到就直接追加（但这可能导致重复或顺序问题）
+                console.warn(`[History] Could not find placeholder AI message (non-stream) for request ${data.request_id} in session ${activeSessionId}. Appending new message.`);
+                sessionToUpdate.history.push({
+                    role: 'model',
+                    parts: [{ text: data.message || '' }],
+                    provider: data.provider || 'AI'
+                    // 不应该有 temp_id 因为这是最终消息
+                });
+                saveChatSessionsToStorage();
+            }
+        } else {
+            console.warn(`[History] Could not find session ${activeSessionId} to update AI message (non-stream).`);
+        }
+    } else {
+        console.warn("[History] No active session ID found or chatSessions/saveChatSessionsToStorage not available for non-stream AI message history update.");
+    }
+});
+
+
+
+    socket.on('new_screenshot', function(data) {
+    console.log('<<<<< [Socket RECEIVED] new_screenshot >>>>>', data);
+    // data 预期格式: { image_url: "...", analysis: "...", prompt: "...", timestamp: ..., provider: "..." }
+
+    if (typeof addHistoryItem === 'function') {
+        addHistoryItem(data); // addHistoryItem 会创建列表项并处理点击事件
+    } else {
+        console.warn("Function addHistoryItem is not defined. Cannot add to screenshot history.");
+    }
+
+    // 可选：如果你希望新截图立即显示在主区域（而不仅仅是添加到历史列表）
+    // 通常是点击历史条目才显示在主区域，但这里提供一个立即显示的选择
+    const shouldDisplayImmediately = false; // 改为 true 如果你想立即显示
+    if (shouldDisplayImmediately) {
+        const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
+
+        if (mainAnalysisEl) {
+            mainAnalysisEl.innerHTML = ''; // 清空
+            const analysisContentDiv = document.createElement('div');
+            analysisContentDiv.className = 'message-content';
+            processAIMessage(analysisContentDiv, data.analysis || 'AI分析完成，但无文本结果。', 'new_screenshot_immediate_analysis');
+            mainAnalysisEl.appendChild(analysisContentDiv);
+            mainAnalysisEl.dataset.sourceUrl = data.image_url;
+        }
+        if (mainImagePreviewEl) {
+            mainImagePreviewEl.src = data.image_url + '?t=' + Date.now();
+            mainImagePreviewEl.alt = `截图预览 - ${new Date((data.timestamp || Date.now()/1000) * 1000).toLocaleString()}`;
+            mainImagePreviewEl.style.display = 'block';
+        }
+    }
+});
+
+socket.on('analysis_result', function(data) {
+    console.log('<<<<< [Socket RECEIVED] analysis_result >>>>>', data);
+    // data 预期格式: { request_id: "?", image_url: "...", analysis: "...", provider: "...", prompt: "...", timestamp: ... }
+    // 这个事件通常是在特定分析任务（如裁剪后分析，或初始上传后的分析）完成后发送的。
+    // new_screenshot 事件可能已经包含了初始分析。你需要协调这两个事件。
+
+    // 主要用途：如果用户正在查看某个截图，并且这个截图的分析结果更新了，则更新主显示区域。
+    const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+    if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === data.image_url) {
+        console.log(`Updating main analysis display for ${data.image_url} due to 'analysis_result' event.`);
+        mainAnalysisEl.innerHTML = ''; // 清空
+        const analysisContentDiv = document.createElement('div');
+        analysisContentDiv.className = 'message-content';
+        processAIMessage(analysisContentDiv, data.analysis || 'AI分析结果为空。', 'analysis_result_update');
+        mainAnalysisEl.appendChild(analysisContentDiv);
+    }
+
+    // 你可能还需要更新 historyList 中对应条目的 data-analysis 属性，
+    // 这样如果用户之后再点击这个历史条目，能看到最新的分析。
+    const historyListEl = document.getElementById('ss-history-list');
+    if (historyListEl) {
+        const listItem = historyListEl.querySelector(`li[data-url="${data.image_url}"]`);
+        if (listItem) {
+            listItem.dataset.analysis = data.analysis || '';
+            console.log(`Updated data-analysis for history item ${data.image_url}`);
+        }
+    }
+});
+
+socket.on('analysis_error', function(data) {
+    console.error('<<<<< [Socket RECEIVED] analysis_error >>>>>', data);
+    // data: { request_id: "?", image_url: "...", error: "..." }
+    const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+    // 如果错误是针对当前显示的图片，或者主分析区是空的/初始状态
+    if (mainAnalysisEl && (mainAnalysisEl.dataset.sourceUrl === data.image_url || 
+        mainAnalysisEl.textContent.includes('请在左侧点击历史记录') || 
+        mainAnalysisEl.textContent.includes('等待截屏和分析中'))) {
+        mainAnalysisEl.innerHTML = `<p class="error-message"><strong>图片分析错误 (${data.image_url || '未知图片'}):</strong> ${escapeHtml(data.error)}</p>`;
+    }
+    // 也可以在对应的历史条目旁显示错误图标
+    const historyListEl = document.getElementById('ss-history-list');
+    if (historyListEl) {
+        const listItem = historyListEl.querySelector(`li[data-url="${data.image_url}"]`);
+        if (listItem) {
+            // 示例：添加一个错误提示到历史条目
+            let errorHint = listItem.querySelector('.history-item-error-hint');
+            if (!errorHint) {
+                errorHint = document.createElement('span');
+                errorHint.className = 'history-item-error-hint';
+                errorHint.style.color = 'red';
+                errorHint.style.fontSize = '0.8em';
+                errorHint.textContent = ' (分析失败)';
+                const timestampDiv = listItem.querySelector('.history-item-text');
+                if(timestampDiv) timestampDiv.appendChild(errorHint);
+            }
+        }
+    }
+});
+
+    socket.on('stt_result', function(data) {
+        console.log('<<<<< [Socket RECEIVED] stt_result >>>>>', data);
+        const voiceResultEl = document.getElementById('voice-result');
+        // 确保 window.currentVoiceRequestId 在开始录音时已设置，并与 data.request_id 匹配
+        if (voiceResultEl && data.request_id === window.currentVoiceRequestId) {
+            let currentHTML = voiceResultEl.innerHTML;
+            // 尝试更安全地清除 "处理中..." 或 "AI正在回复..."
+            const processingMessages = ['处理中...', 'AI正在回复...'];
+            processingMessages.forEach(msg => {
+                currentHTML = currentHTML.replace(new RegExp(`<p.*?>${msg}</p>`, 'gi'), ''); // 移除包含这些文本的<p>标签
+                currentHTML = currentHTML.replace(msg, ''); // 直接替换文本
+            });
+            if (currentHTML.trim() === '<div class="system-message">点击下方按钮开始录音，识别结果和 AI 回答将显示在此处。</div>' || currentHTML.trim() === '') {
+                currentHTML = ''; // 如果是初始消息或空，则清空
+            }
+
+            voiceResultEl.innerHTML = currentHTML + 
+                                    `<p><strong>识别到 (${data.provider || 'STT'}):</strong> ${escapeHtml(data.transcript)}</p>` +
+                                    `<p>AI正在回复...</p>`; // 提示用户AI正在处理
+            scrollToChatBottom(voiceResultEl); // 如果 voiceResultEl 是可滚动的
+        }
+    });
+
+    socket.on('stt_error', function(data) {
+        console.error('<<<<< [Socket RECEIVED] stt_error >>>>>', data);
+        const voiceResultEl = document.getElementById('voice-result');
+        if (voiceResultEl && data.request_id === window.currentVoiceRequestId) {
+            voiceResultEl.innerHTML = `<p class="error-message"><strong>语音识别错误 (${data.provider || 'STT'}):</strong> ${escapeHtml(data.error)}</p>`;
+            // 重置录音按钮状态
+            document.getElementById('voice-start-recording').disabled = false;
+            document.getElementById('voice-stop-recording').disabled = true;
+        }
+    });
+
+    socket.on('voice_chat_response', function(data) {
+        console.log('<<<<< [Socket RECEIVED] voice_chat_response >>>>>', data); // **关键日志**
+        const voiceResultEl = document.getElementById('voice-result');
+        if (voiceResultEl && data.request_id === window.currentVoiceRequestId) {
+            voiceResultEl.innerHTML = ''; // 清空之前的所有状态
+
+            const transcriptHtml = `<div style="margin-bottom:0.5rem;"><strong><i class="fas fa-comment-dots"></i> 识别结果 (<span class="math-inline">\{data\.stt\_provider \|\| 'STT'\}\)\:</strong\><div class\="message\-content\-simple"\></span>{escapeHtml(data.transcript || '未提供识别文本')}</div></div>`;
+
+            const aiResponseContainer = document.createElement('div');
+            aiResponseContainer.innerHTML = `<strong><i class="fas fa-robot"></i> AI回答 (${data.chat_provider || 'AI'}):</strong>`;
+
+            const aiMessageDiv = document.createElement('div');
+            aiMessageDiv.className = 'ai-message'; // 复用聊天消息样式
+            aiMessageDiv.dataset.provider = data.chat_provider || 'AI'; 
+            processAIMessage(aiMessageDiv, data.message || 'AI未返回有效回复。', 'voice_chat_response'); // 使用 processAIMessage 渲染
+
+            aiResponseContainer.appendChild(aiMessageDiv);
+
+            voiceResultEl.innerHTML = transcriptHtml + '<hr>';
+            voiceResultEl.appendChild(aiResponseContainer);
+
+            addVoiceHistoryItem({ // 添加到左侧语音历史
+                transcript: data.transcript,
+                response: data.message,
+                // provider: data.chat_provider // 可选
+            });
+
+            // 重置录音按钮状态
+            document.getElementById('voice-start-recording').disabled = false;
+            document.getElementById('voice-stop-recording').disabled = true;
+            scrollToChatBottom(voiceResultEl);
+        }
+    });
+    
+    socket.on('api_info', function(data) {
+        console.log('<<<<< [Socket RECEIVED] api_info >>>>>', data);
+        if (typeof updateApiInfo === 'function') {
+            updateApiInfo(data); // data 应该包含 { provider: "..." }
+        } else {
+            console.error("updateApiInfo function is not defined.");
+        }
+    });
 
     socket.on('voice_answer', function(data) {
         console.log('[Socket] Received voice answer:', data);
@@ -694,62 +1122,404 @@ function initSelectionControls(){/* ... (selection controls logic as provided in
     const sb=document.getElementById('selection-box'),oi=document.getElementById('overlay-image');if(!sb||!oi)return;let sx_s,sy_s,isx_s,isy_s,isr_s;function hs(e){e.preventDefault();isDragging=true;const tE=e.type.startsWith('touch'),cX=tE?e.touches[0].clientX:e.clientX,cY=tE?e.touches[0].clientY:e.clientY,iR=oi.getBoundingClientRect();sx_s=cX-iR.left;sy_s=cY-iR.top;isx_s=cX;isy_s=cY;isr_s={...selection};const br=sb.getBoundingClientRect(),rx=cX-br.left,ry=cY-br.top,et=15;dragType=rx>=isr_s.width-et&&ry>=isr_s.height-et?'resize-se':sx_s>=isr_s.x&&sx_s<=isr_s.x+isr_s.width&&sy_s>=isr_s.y&&sy_s<=isr_s.y+isr_s.height?'move':(dragType='draw',selection={x:sx_s,y:sy_s,width:0,height:0},updateSelectionBox(),undefined);if(!isDragging&&dragType!='draw')return;if(tE){document.addEventListener('touchmove',hm,{passive:false});document.addEventListener('touchend',he);document.addEventListener('touchcancel',he);}else{document.addEventListener('mousemove',hm);document.addEventListener('mouseup',he);}}function hm(e){if(!isDragging)return;e.preventDefault();const tE=e.type.startsWith('touch'),cX=tE?e.touches[0].clientX:e.clientX,cY=tE?e.touches[0].clientY:e.clientY,iR=oi.getBoundingClientRect(),currXimg=cX-iR.left,currYimg=cY-iR.top,dcx=cX-isx_s,dcy=cY-isy_s;if(dragType==='move'){selection.x=isr_s.x+dcx;selection.y=isr_s.y+dcy;}else if(dragType==='resize-se'){selection.width=isr_s.width+dcx;selection.height=isr_s.height+dcy;}else if(dragType==='draw'){selection.width=currXimg-selection.x;selection.height=currYimg-selection.y;if(selection.width<0){selection.x=currXimg;selection.width=-selection.width;}if(selection.height<0){selection.y=currYimg;selection.height=-selection.height;}}updateSelectionBox();}function he(){if(!isDragging)return;isDragging=false;dragType='';document.removeEventListener('mousemove',hm);document.removeEventListener('mouseup',he);document.removeEventListener('touchmove',hm,{passive:false});document.removeEventListener('touchend',he);document.removeEventListener('touchcancel',he);}oi.replaceWith(oi.cloneNode(true));document.getElementById('overlay-image').addEventListener('mousedown',hs);document.getElementById('overlay-image').addEventListener('touchstart',hs,{passive:false});sb.replaceWith(sb.cloneNode(true));document.getElementById('selection-box').addEventListener('mousedown',hs);document.getElementById('selection-box').addEventListener('touchstart',hs,{passive:false});const nsb=document.getElementById('selection-box');if('ontouchstart'in window&&!nsb.querySelector('.resize-handle-se')){const rh=document.createElement('div');rh.className='resize-handle resize-handle-se';nsb.appendChild(rh);}}
 
 // --- History & UI Update Functions ---
-function addHistoryItem(item) { /* ... (screenshot history item add logic) ... */
+// 修改后的 addHistoryItem (用于截图历史记录显示)
+function addHistoryItem(item) {
     const historyListEl = document.getElementById('ss-history-list');
-    if (!historyListEl || !item || !item.image_url || historyListEl.querySelector(`[data-url="${item.image_url}"]`)) return;
-    const li = document.createElement('li'); li.className = 'history-item'; li.setAttribute('data-url', item.image_url);
-    const img = document.createElement('img'); img.src = item.image_url + '?t=' + Date.now(); img.alt = '历史截图'; img.loading = 'lazy';
-    img.onerror = () => { li.innerHTML = `<div class="history-error">图片加载失败</div>`; li.appendChild(createDeleteButton(() => { if (confirm('删除此记录?')) li.remove(); })); };
-    const timestampDiv = document.createElement('div'); timestampDiv.className = 'history-item-text';
-    const date = item.timestamp ? new Date(item.timestamp * 1000) : new Date();
+    if (!historyListEl || !item || !item.image_url) {
+        console.warn("Cannot add screenshot history item, list element or item data missing.", item);
+        return;
+    }
+
+    if (historyListEl.querySelector(`li[data-url="${item.image_url}"]`)) {
+        console.log(`Screenshot history item for ${item.image_url} already exists. Updating analysis if newer.`);
+        const existingLi = historyListEl.querySelector(`li[data-url="${item.image_url}"]`);
+        if (existingLi && typeof item.analysis === 'string' && existingLi.dataset.analysis !== item.analysis) {
+            existingLi.dataset.analysis = item.analysis;
+            const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+            if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === item.image_url) {
+                mainAnalysisEl.innerHTML = '';
+                const analysisContentDiv = document.createElement('div');
+                analysisContentDiv.className = 'message-content';
+                if (typeof processAIMessage === 'function') {
+                    const tempAiMessageDiv = document.createElement('div');
+                    tempAiMessageDiv.className = 'ai-message';
+                    tempAiMessageDiv.dataset.provider = item.provider || 'AI';
+                    processAIMessage(tempAiMessageDiv, item.analysis, 'history_item_analysis_update');
+                    while (tempAiMessageDiv.firstChild) {
+                        analysisContentDiv.appendChild(tempAiMessageDiv.firstChild);
+                    }
+                } else {
+                    analysisContentDiv.textContent = item.analysis || '(processAIMessage 未定义)';
+                }
+                mainAnalysisEl.appendChild(analysisContentDiv);
+            }
+        }
+        return;
+    }
+
+    const li = document.createElement('li');
+    li.className = 'history-item';
+    li.setAttribute('data-url', item.image_url);
+    li.dataset.analysis = item.analysis || '';
+    li.dataset.prompt = item.prompt || 'Describe this screenshot and highlight anything unusual.';
+    li.dataset.timestamp = String(item.timestamp || (Date.now() / 1000));
+    li.dataset.provider = item.provider || 'unknown';
+
+    const contentWrapper = document.createElement('div');
+    contentWrapper.className = 'history-item-content-wrapper';
+
+    const img = document.createElement('img');
+    img.src = item.image_url + '?t=' + Date.now();
+    img.alt = '历史截图缩略图';
+    img.loading = 'lazy';
+    const timestampDivForError = document.createElement('div');
+
+    img.onerror = () => {
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'history-error';
+        errorDiv.textContent = '图片加载失败';
+        if (img.parentNode) {
+            img.parentNode.replaceChild(errorDiv, img);
+        } else {
+            li.insertBefore(errorDiv, timestampDivForError);
+        }
+    };
+
+    const timestampDiv = timestampDivForError;
+    timestampDiv.className = 'history-item-text';
+    const date = new Date(parseFloat(li.dataset.timestamp) * 1000);
     timestampDiv.textContent = date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
     timestampDiv.title = date.toLocaleString();
-    const deleteBtn = createDeleteButton(() => {
-        if (confirm('删除此截图记录?')) { li.remove(); const analysisEl = document.getElementById('ss-ai-analysis'); if (analysisEl && analysisEl.dataset.sourceUrl === item.image_url) { analysisEl.textContent = '请在左侧点击历史记录...'; delete analysisEl.dataset.sourceUrl; } }
+
+    contentWrapper.appendChild(img);
+    contentWrapper.appendChild(timestampDiv);
+
+    const actionsContainer = document.createElement('div');
+    actionsContainer.className = 'history-item-actions';
+
+    if (typeof createDeleteButton === 'function') {
+        const deleteBtn = createDeleteButton(() => {
+            if (confirm('确定要删除此截图记录及其分析吗?')) {
+                if (typeof clearMainScreenshotDisplay === 'function') {
+                    const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+                    if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === item.image_url) {
+                        clearMainScreenshotDisplay();
+                    }
+                }
+                li.remove();
+                console.log(`Screenshot history item ${item.image_url} deleted.`);
+            }
+        });
+        actionsContainer.appendChild(deleteBtn);
+    }
+
+    li.appendChild(contentWrapper);
+    li.appendChild(actionsContainer);
+
+    li.addEventListener('click', (e) => {
+        if (e.target.closest('.history-item-actions')) {
+            return;
+        }
+
+        const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
+        const cropCurrentBtn = document.getElementById('ss-crop-current-btn');
+
+        if (mainAnalysisEl) {
+            mainAnalysisEl.innerHTML = '';
+            const analysisContentDiv = document.createElement('div');
+            analysisContentDiv.className = 'message-content';
+            const analysisText = li.dataset.analysis || '此截图没有分析结果。';
+            const analysisProvider = li.dataset.provider || 'AI';
+            const tempAiMessageDiv = document.createElement('div');
+            tempAiMessageDiv.className = 'ai-message';
+            tempAiMessageDiv.dataset.provider = analysisProvider;
+            if (typeof processAIMessage === 'function') {
+                processAIMessage(tempAiMessageDiv, analysisText, 'history_click_ss_analysis');
+                while (tempAiMessageDiv.firstChild) {
+                    analysisContentDiv.appendChild(tempAiMessageDiv.firstChild);
+                }
+            } else {
+                analysisContentDiv.textContent = analysisText + " (processAIMessage 未定义)";
+            }
+            mainAnalysisEl.appendChild(analysisContentDiv);
+            mainAnalysisEl.dataset.sourceUrl = item.image_url;
+        }
+
+        if (mainImagePreviewEl) {
+            mainImagePreviewEl.src = item.image_url + '?t=' + Date.now();
+            mainImagePreviewEl.alt = `截图预览 - ${new Date(parseFloat(li.dataset.timestamp) * 1000).toLocaleString()}`;
+            mainImagePreviewEl.style.display = 'block';
+            mainImagePreviewEl.dataset.currentUrl = item.image_url;
+            if (cropCurrentBtn) cropCurrentBtn.style.display = 'inline-block';
+        } else {
+            if (cropCurrentBtn) cropCurrentBtn.style.display = 'none';
+        }
+
+        const currentActive = historyListEl.querySelector('.active-screenshot-item');
+        if (currentActive) currentActive.classList.remove('active-screenshot-item');
+        li.classList.add('active-screenshot-item');
     });
-    li.appendChild(img); li.appendChild(timestampDiv); li.appendChild(deleteBtn);
-    li.onclick = (e) => {
-        if (e.target.closest('.delete-history')) return;
-        showImageOverlay(item.image_url);
-        const analysisEl = document.getElementById('ss-ai-analysis');
-        if(analysisEl) { analysisEl.textContent = item.analysis || (item.analysis === "" ? '(AI分析为空)' : '(无分析或加载中)'); analysisEl.dataset.sourceUrl = item.image_url; }
-    };
+
     historyListEl.insertBefore(li, historyListEl.firstChild);
 }
-function addVoiceHistoryItem(item) { /* ... (voice history item add logic, use processAIMessage for responseText) ... */
-    const voiceHistoryListEl = document.getElementById('voice-history-list'); if (!voiceHistoryListEl) return;
-    const li = document.createElement('li'); li.className = 'history-item voice-history-item';
-    const timestamp = new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
-    const transcript = item.transcript || '无法识别'; const responseText = item.response || '无回答';
-    const transcriptDisplay = transcript.length > 30 ? transcript.substring(0, 27) + '...' : transcript;
-    li.innerHTML = `<div class="history-item-text"><div><strong><i class="fas fa-clock"></i> ${timestamp}</strong></div><div title="${escapeHtml(transcript)}"><i class="fas fa-comment-dots"></i> ${escapeHtml(transcriptDisplay)}</div></div>`;
-    const deleteBtn = createDeleteButton(() => { if (confirm('删除此语音记录?')) li.remove(); }); li.appendChild(deleteBtn);
+
+
+// --- 辅助函数：清空主截图显示区 ---
+function clearMainScreenshotDisplay() {
+    const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
+    const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+    const cropCurrentBtn = document.getElementById('ss-crop-current-btn');
+
+    if (mainImagePreviewEl) {
+        mainImagePreviewEl.src = '#';
+        mainImagePreviewEl.style.display = 'none';
+        mainImagePreviewEl.removeAttribute('data-current-url');
+    }
+    if (mainAnalysisEl) {
+        mainAnalysisEl.textContent = '请在左侧点击历史记录查看分析结果，或点击“发起截屏”进行分析。';
+        mainAnalysisEl.removeAttribute('data-source-url');
+    }
+    if (cropCurrentBtn) {
+        cropCurrentBtn.style.display = 'none';
+    }
+    const historyListEl = document.getElementById('ss-history-list');
+    const currentActive = historyListEl?.querySelector('.active-screenshot-item');
+    if (currentActive) {
+        currentActive.classList.remove('active-screenshot-item');
+    }
+}
+
+// --- 初始化截图分析相关的按钮和事件 ---
+function initScreenshotAnalysisHandlers() {
+    // “发起截屏”按钮
+    document.getElementById('ss-capture-btn')?.addEventListener('click', () => {
+        if (typeof requestScreenshot === 'function') {
+            requestScreenshot();
+            // 点击发起截屏后，可以考虑清空主显示区或显示等待信息
+            const analysisEl = document.getElementById('ss-ai-analysis');
+            if (analysisEl) {
+                analysisEl.innerHTML = '<p><i class="fas fa-spinner fa-spin"></i> 等待截屏和分析中...</p>';
+            }
+            const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
+            if (mainImagePreviewEl) mainImagePreviewEl.style.display = 'none';
+            const cropBtn = document.getElementById('ss-crop-current-btn');
+            if (cropBtn) cropBtn.style.display = 'none';
+
+        } else {
+            console.error("requestScreenshot function is not defined.");
+        }
+    });
+
+    // “清空截图历史”按钮
+    document.getElementById('ss-clear-history')?.addEventListener('click', () => {
+        if(confirm('确定要清空所有截图历史记录吗？')) {
+            const historyListEl = document.getElementById('ss-history-list');
+            if (historyListEl) historyListEl.innerHTML = '';
+            if (typeof clearMainScreenshotDisplay === 'function') {
+                clearMainScreenshotDisplay();
+            }
+        }
+    });
+
+    // 主预览区旁的“裁剪此图”按钮
+    document.getElementById('ss-crop-current-btn')?.addEventListener('click', () => {
+        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
+        const imageUrlToCrop = mainImagePreviewEl ? mainImagePreviewEl.dataset.currentUrl : null;
+
+        if (imageUrlToCrop) {
+            console.log(`[CROP] Crop button clicked for image: ${imageUrlToCrop}`);
+            if (typeof showImageOverlay === 'function') {
+                showImageOverlay(imageUrlToCrop);
+            } else {
+                console.error("showImageOverlay function is not defined.");
+            }
+        } else {
+            alert("没有当前显示的图片可供裁剪。请先从历史记录中选择一张图片。");
+            console.warn("[CROP] Crop button clicked, but no current image URL found in main preview.");
+        }
+    });
+
+    // (可选) 关闭覆盖层的按钮事件，确保它们调用 hideImageOverlay
+    document.getElementById('close-overlay')?.addEventListener('click', () => {
+        if (typeof hideImageOverlay === 'function') hideImageOverlay();
+    });
+    document.getElementById('cancel-selection')?.addEventListener('click', () => {
+        if (typeof hideImageOverlay === 'function') hideImageOverlay();
+    });
+    // “确认裁剪并分析”按钮的事件监听器应该在 `initBaseButtonHandlers` 或类似地方，因为它调用 `confirmCrop`
+    // document.getElementById('confirm-selection')?.addEventListener('click', confirmCrop); 
+    // ^^^ 这个应该已经在 initBaseButtonHandlers 或类似的地方了
+}
+
+
+
+
+// 修改后的 addChatHistoryItem (AI 对话历史)
+function addChatHistoryItem(session) {
+    const historyListEl = document.getElementById('chat-session-list');
+    if (!historyListEl || !session || !session.id) {
+        console.warn("Cannot add chat session item, list or session data missing.", session);
+        return;
+    }
+
+    const existingLi = historyListEl.querySelector(`li[data-session-id="${session.id}"]`);
+    if (existingLi) existingLi.remove();
+
+    const li = document.createElement('li');
+    li.className = 'history-item chat-history-item';
+    li.setAttribute('data-session-id', String(session.id));
+
+    const contentWrapper = document.createElement('div');
+    contentWrapper.className = 'history-item-content-wrapper';
+
+    const titleText = session.title || '无标题对话';
+    const timestamp = new Date(session.id).toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
+
+    const titleDiv = document.createElement('div');
+    titleDiv.title = escapeHtml(titleText);
+    titleDiv.style.fontWeight = '500';
+    titleDiv.style.whiteSpace = 'nowrap';
+    titleDiv.style.overflow = 'hidden';
+    titleDiv.style.textOverflow = 'ellipsis';
+    titleDiv.innerHTML = `<i class="fas fa-comment"></i> ${escapeHtml(titleText)}`;
+
+    const timeDiv = document.createElement('div');
+    timeDiv.style.fontSize = '0.75em';
+    timeDiv.style.color = '#666';
+    timeDiv.textContent = timestamp;
+
+    contentWrapper.appendChild(titleDiv);
+    contentWrapper.appendChild(timeDiv);
+
+    const actionsContainer = document.createElement('div');
+    actionsContainer.className = 'history-item-actions';
+
+    if (typeof createDeleteButton === 'function') {
+        const deleteBtn = createDeleteButton(() => {
+            if (confirm(`确定要删除对话 \"${escapeHtml(titleText)}\"?`)) {
+                chatSessions = chatSessions.filter(s => s.id !== session.id);
+                li.remove();
+                if (currentChatSessionId === session.id && typeof clearCurrentChatDisplay === 'function') {
+                    clearCurrentChatDisplay();
+                }
+                if (typeof saveChatSessionsToStorage === 'function') saveChatSessionsToStorage();
+            }
+        });
+        actionsContainer.appendChild(deleteBtn);
+    }
+
+    li.appendChild(contentWrapper);
+    li.appendChild(actionsContainer);
+
     li.addEventListener('click', (e) => {
-        if (e.target.closest('.delete-history')) return;
+        if (e.target.closest('.history-item-actions')) return;
+
+        const sessionId = Number(li.getAttribute('data-session-id'));
+        const clickedSession = chatSessions.find(s => s.id === sessionId);
+        if (clickedSession) {
+            currentChatSessionId = clickedSession.id;
+            if (typeof renderChatHistory === 'function') renderChatHistory(clickedSession.history);
+
+            historyListEl.querySelectorAll('.history-item.active-session').forEach(item => item.classList.remove('active-session'));
+            li.classList.add('active-session');
+
+            document.getElementById('chat-chat-input')?.focus();
+            if (typeof saveCurrentChatSessionId === 'function') saveCurrentChatSessionId();
+        }
+    });
+
+    historyListEl.insertBefore(li, historyListEl.firstChild);
+}
+
+// 修改后的 addVoiceHistoryItem (语音历史记录)
+function addVoiceHistoryItem(item) {
+    const voiceHistoryListEl = document.getElementById('voice-history-list');
+    if (!voiceHistoryListEl || !item) {
+        console.warn("Cannot add voice history item, list or item data missing.", item);
+        return;
+    }
+
+    const li = document.createElement('li');
+    li.className = 'history-item voice-history-item';
+    li.dataset.transcript = item.transcript || '无法识别';
+    li.dataset.response = item.response || '无回答';
+    const timestampForStorage = Date.now();
+    li.dataset.timestamp = String(timestampForStorage / 1000);
+
+    const contentWrapper = document.createElement('div');
+    contentWrapper.className = 'history-item-content-wrapper';
+
+    const timestamp = new Date(timestampForStorage).toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
+    const transcript = item.transcript || '无法识别';
+    const transcriptDisplay = transcript.length > 30 ? transcript.substring(0, 27) + '...' : transcript;
+
+    const timeDivVoice = document.createElement('div');
+    timeDivVoice.innerHTML = `<strong><i class="fas fa-clock"></i> ${timestamp}</strong>`;
+
+    const transcriptDivVoice = document.createElement('div');
+    transcriptDivVoice.title = escapeHtml(transcript);
+    transcriptDivVoice.innerHTML = `<i class="fas fa-comment-dots"></i> ${escapeHtml(transcriptDisplay)}`;
+
+    contentWrapper.appendChild(timeDivVoice);
+    contentWrapper.appendChild(transcriptDivVoice);
+
+    const actionsContainer = document.createElement('div');
+    actionsContainer.className = 'history-item-actions';
+
+    if (typeof createDeleteButton === 'function') {
+        const deleteBtn = createDeleteButton(() => {
+            if (confirm('确定要删除此语音记录吗?')) {
+                li.remove();
+                const voiceResultEl = document.getElementById('voice-result');
+                if (voiceResultEl && voiceResultEl.dataset.associatedTimestamp === String(timestampForStorage)) {
+                    voiceResultEl.innerHTML = '点击下方按钮开始录音，识别结果和 AI 回答将显示在此处。';
+                    delete voiceResultEl.dataset.associatedTimestamp;
+                }
+            }
+        });
+        actionsContainer.appendChild(deleteBtn);
+    }
+
+    li.appendChild(contentWrapper);
+    li.appendChild(actionsContainer);
+
+    li.addEventListener('click', (e) => {
+        if (e.target.closest('.history-item-actions')) return;
+
         const voiceResultEl = document.getElementById('voice-result');
         if (voiceResultEl) {
-            const transcriptHtml = `<div style="margin-bottom:0.5rem;"><strong><i class="fas fa-comment-dots"></i> 识别结果:</strong><span class="message-content-simple">${escapeHtml(transcript)}</span></div>`;
-            const aiResponseHtml = `<div><strong><i class="fas fa-robot"></i> AI回答:</strong><div class="message-content" id="v-hist-ai-resp"></div></div>`; // Placeholder for message-content
-            voiceResultEl.innerHTML = `${transcriptHtml}<hr>${aiResponseHtml}`;
-            const respContentEl = document.getElementById('v-hist-ai-resp'); // This is now the .message-content div
-            if (respContentEl) processAIMessage(respContentEl, responseText); // Use processAIMessage
+            voiceResultEl.innerHTML = '';
+            voiceResultEl.dataset.associatedTimestamp = String(timestampForStorage);
+
+            const stashedTranscript = li.dataset.transcript;
+            const stashedResponse = li.dataset.response;
+
+            const transcriptHtml = `<div style="margin-bottom:0.5rem;"><strong><i class="fas fa-comment-dots"></i> 识别结果:</strong><div class="message-content-simple">${escapeHtml(stashedTranscript)}</div></div>`;
+
+            const aiResponseContainer = document.createElement('div');
+            aiResponseContainer.innerHTML = `<strong><i class="fas fa-robot"></i> AI回答:</strong>`;
+
+            const aiMessageDiv = document.createElement('div');
+            aiMessageDiv.className = 'ai-message';
+            if (typeof processAIMessage === 'function') {
+                processAIMessage(aiMessageDiv, stashedResponse, 'voice_history_click');
+            } else {
+                aiMessageDiv.textContent = stashedResponse + " (processAIMessage 未定义)";
+            }
+            aiResponseContainer.appendChild(aiMessageDiv);
+
+            voiceResultEl.innerHTML = transcriptHtml + '<hr>';
+            voiceResultEl.appendChild(aiResponseContainer);
         }
+
         voiceHistoryListEl.querySelectorAll('.history-item.active-session').forEach(i => i.classList.remove('active-session'));
         li.classList.add('active-session');
     });
+
     voiceHistoryListEl.insertBefore(li, voiceHistoryListEl.firstChild);
 }
-function addChatHistoryItem(session) { /* ... (chat history item add logic) ... */
-    const historyListEl = document.getElementById('chat-session-list'); if (!historyListEl || !session) return;
-    const existingLi = historyListEl.querySelector(`[data-session-id="${session.id}"]`); if (existingLi) existingLi.remove();
-    const li = document.createElement('li'); li.className = 'history-item chat-history-item'; li.setAttribute('data-session-id', String(session.id));
-    const titleText = session.title || '无标题对话'; const timestamp = new Date(session.id).toLocaleString([],{dateStyle:'short',timeStyle:'short',hour12:false});
-    li.innerHTML = `<div class="history-item-text"><div title="${escapeHtml(titleText)}" style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><i class="fas fa-comment"></i> ${escapeHtml(titleText)}</div><div style="font-size:0.75em;color:#666;">${timestamp}</div></div>`;
-    const deleteBtn = createDeleteButton(()=>{if(confirm(`删除对话 "${escapeHtml(titleText)}"?`)){chatSessions=chatSessions.filter(s=>s.id!==session.id);li.remove();if(currentChatSessionId===session.id)clearCurrentChatDisplay();saveChatSessionsToStorage();}});
-    li.appendChild(deleteBtn);
-    li.addEventListener('click',(e)=>{if(e.target.closest('.delete-history'))return;const sessionId=Number(li.getAttribute('data-session-id'));const clickedSession=chatSessions.find(s=>s.id===sessionId);if(clickedSession){currentChatSessionId=clickedSession.id;renderChatHistory(clickedSession.history);historyListEl.querySelectorAll('.history-item.active-session').forEach(item=>item.classList.remove('active-session'));li.classList.add('active-session');document.getElementById('chat-chat-input')?.focus();saveCurrentChatSessionId();}});
-    if(historyListEl.firstChild)historyListEl.insertBefore(li,historyListEl.firstChild);else historyListEl.appendChild(li);
-}
+
 function createDeleteButton(onClickCallback) { const btn=document.createElement('button');btn.className='delete-history';btn.innerHTML='<i class="fas fa-times"></i>';btn.title='删除';btn.type='button';btn.onclick=e=>{e.stopPropagation();onClickCallback();};return btn; }
 function renderChatHistory(historyArray) { /* ... (render chat history, use processAIMessage for model turns) ... */
     const chatHistoryEl=document.getElementById('chat-chat-history');
@@ -804,13 +1574,100 @@ function getApiInfo() {
     .then(r=>{if(r.status===401)throw new Error('Unauthorized');if(!r.ok)throw new Error(`API信息获取失败(${r.status})`);return r.json();})
     .then(updateApiInfo).catch(e=>{console.error('API info error:',e);updateApiInfo({provider:`错误(${e.message})`});});
 }
-function sendVoiceToServer(audioBlob) { /* ... (send voice to server logic) ... */
-    const fd = new FormData(); fd.append('audio', audioBlob, `rec_${Date.now()}.wav`);
-    const resEl = document.getElementById('voice-result'); if(resEl)resEl.innerHTML='<i class="fas fa-spinner fa-spin"></i> 处理中...';
-    fetch('/process_voice',{method:'POST',body:fd,headers:{'Authorization':`Bearer ${TOKEN}`}})
-    .then(r=>{if(!r.ok)return r.json().catch(()=>({error:`HTTP ${r.status}`})).then(eD=>{throw new Error(eD.message||eD.error||`HTTP ${r.status}`)});return r.json()})
-    .then(d=>debugLog(`Voice ack: ${JSON.stringify(d)}`)) // Server emits voice_chat_response
-    .catch(e=>{console.error('Voice upload err:',e);if(resEl)resEl.textContent=`语音处理失败: ${e.message}`;const s=document.getElementById('voice-start-recording'),st=document.getElementById('voice-stop-recording');if(s)s.disabled=false;if(st)st.disabled=true;});
+function sendVoiceToServer(audioBlob) {
+    const fd = new FormData();
+    const timestamp = Date.now();
+    // 后端会根据上传的文件名和内容确定格式，这里的文件名主要是为了 FormData
+    fd.append('audio', audioBlob, `recorded_audio_${timestamp}.wav`); 
+
+    const requestIdForThisOperation = window.currentVoiceRequestId; // 获取当前操作的ID
+
+    // 1. 检查并添加 request_id
+    if (requestIdForThisOperation) {
+        fd.append('request_id', requestIdForThisOperation);
+        console.log('[VOICE] Sending voice to /process_voice with client-generated request_id:', requestIdForThisOperation);
+    } else {
+        console.error("[VOICE] CRITICAL: window.currentVoiceRequestId was NOT SET when sendVoiceToServer was called! Aborting send.");
+        const voiceResultEl = document.getElementById('voice-result');
+        if(voiceResultEl) voiceResultEl.innerHTML = '<p class="error-message">内部错误：请求ID丢失，无法发送语音。请重试。</p>';
+        // 重新启用开始录音按钮，禁用停止按钮
+        const startBtn = document.getElementById('voice-start-recording');
+        const stopBtn = document.getElementById('voice-stop-recording');
+        if(startBtn) startBtn.disabled = false;
+        if(stopBtn) stopBtn.disabled = true;
+        return; // 中止发送
+    }
+
+    // 2. 添加 socket_id (可选，用于后端尝试定向发送 Socket.IO 事件)
+    if (socket && socket.id) {
+        fd.append('socket_id', socket.id);
+        // console.log('[VOICE] Sending with socket_id:', socket.id); // 日志可选
+    } else {
+        console.warn('[VOICE] Socket not available or socket.id is missing when sending voice. Backend will likely broadcast Socket.IO events.');
+    }
+    
+    // 3. 更新UI为“处理中...”状态
+    const voiceResultEl = document.getElementById('voice-result');
+    const startRecordingBtn = document.getElementById('voice-start-recording');
+    const stopRecordingBtn = document.getElementById('voice-stop-recording');
+
+    if (voiceResultEl) {
+        const displayRequestId = (requestIdForThisOperation || 'N/A').substring(0, 8);
+        voiceResultEl.innerHTML = `<p><i class="fas fa-spinner fa-spin"></i> 处理中... (ID: ${displayRequestId})</p>`;
+    }
+    // 按钮状态：开始录音禁用（因为正在处理），停止录音禁用（因为已停止）
+    if (startRecordingBtn) startRecordingBtn.disabled = true;
+    if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+
+
+    // 4. 发送 fetch 请求到后端 /process_voice
+    fetch('/process_voice', { 
+        method: 'POST', 
+        body: fd, 
+        headers: { 
+            ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` }) 
+        }
+    })
+    .then(response => {
+        if (!response.ok) {
+            return response.json().catch(() => ({ 
+                message: `语音请求失败，服务器状态: ${response.status} ${response.statusText}` 
+            })).then(errorData => {
+                throw new Error(errorData.message || JSON.stringify(errorData));
+            });
+        }
+        return response.json();
+    })
+    .then(data => {
+        console.log('[AI DEBUG] Voice ack from /process_voice:', data); 
+        if (data.status === 'processing' && data.request_id) {
+            // 确认后端返回的 request_id 与我们发送的一致
+            if (data.request_id !== requestIdForThisOperation) {
+                console.warn(`[VOICE] MISMATCH in HTTP ACK! Client sent ${requestIdForThisOperation}, server ACK'd for ${data.request_id}. This indicates a server-side issue if it's not using the provided ID. Subsequent Socket.IO events might not match.`);
+                // 理论上，如果后端正确使用了前端提供的ID，这里不应该出现mismatch。
+                // 如果出现，需要检查后端 /process_voice 路由获取 request_id 的逻辑。
+            } else {
+                console.log(`[VOICE] HTTP ACK matches sent request_id: ${data.request_id}. Waiting for Socket.IO events.`);
+            }
+            // UI 已经是“处理中...”，按钮状态也已设置。等待 Socket.IO 事件来更新最终结果或错误。
+        } else {
+            const errorMessage = data.message || data.error || '语音请求未被正确处理。';
+            console.error('[VOICE] Voice processing initiation failed on server (non-202 or missing processing status):', errorMessage);
+            if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">语音处理启动失败: ${escapeHtml(errorMessage)}</p>`;
+            if (startRecordingBtn) startRecordingBtn.disabled = false;
+            if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+            window.currentVoiceRequestId = null; // 清理ID，允许新的操作
+        }
+    })
+    .catch(error => {
+        console.error('[VOICE] Error sending voice or handling server ack:', error);
+        if (voiceResultEl) {
+            voiceResultEl.innerHTML = `<p class="error-message">语音请求发送失败: ${escapeHtml(error.message)}</p>`;
+        }
+        if (startRecordingBtn) startRecordingBtn.disabled = false;
+        if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+        window.currentVoiceRequestId = null; // 出错时清理ID，允许新的操作
+    });
 }
 function requestScreenshot(){if(socket?.connected)socket.emit('request_screenshot_capture');else alert('无法请求截图：未连接');}
 
@@ -865,10 +1722,10 @@ function initBaseButtonHandlers() {
 function initTabs(){
     const c=document.querySelector('.tabs-container'),s=document.querySelectorAll('.tab-content-wrapper > .tab-content');if(!c||s.length===0)return;c.addEventListener('click',e=>{const t=e.target.closest('.tab-item');if(!t||t.classList.contains('active'))return;const id=t.dataset.tab,tc=document.getElementById(id);if(tc){c.querySelectorAll('.active').forEach(x=>x.classList.remove('active'));s.forEach(x=>x.classList.remove('active'));t.classList.add('active');tc.classList.add('active');if(id==='ai-chat')document.getElementById('chat-chat-input')?.focus();}});const aT=c.querySelector('.tab-item.active')||c.querySelector('.tab-item');if(aT){aT.classList.add('active');const activeTabContent = document.getElementById(aT.dataset.tab); if(activeTabContent) activeTabContent.classList.add('active'); if(aT.dataset.tab === 'ai-chat')document.getElementById('chat-chat-input')?.focus();}
 }
-function initScreenshotAnalysisHandlers(){
-    document.getElementById('ss-capture-btn')?.addEventListener('click', requestScreenshot);
-    document.getElementById('ss-clear-history')?.addEventListener('click', clearScreenshotHistory);
-}
+// function initScreenshotAnalysisHandlers(){
+//     document.getElementById('ss-capture-btn')?.addEventListener('click', requestScreenshot);
+//     document.getElementById('ss-clear-history')?.addEventListener('click', clearScreenshotHistory);
+// }
 function initAiChatHandlers() {
     document.getElementById('chat-send-chat')?.addEventListener('click', sendChatMessage);
     document.getElementById('chat-chat-input')?.addEventListener('keypress', (e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChatMessage();}});
@@ -897,8 +1754,135 @@ function initAiChatHandlers() {
         console.warn("Test render button #test-render-btn not found in HTML.");
     }
 }
-function initVoiceFeature(){ /* ... (voice feature init as in original user file) ... */
-    const s=document.getElementById('voice-start-recording'),t=document.getElementById('voice-stop-recording'),v=document.getElementById('voice-result');if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder){if(s)s.disabled=true;if(t)t.disabled=true;if(v)v.textContent='浏览器不支持录音。';return;}if(!s||!t||!v)return;s.addEventListener('click',async()=>{audioChunks=[];try{const st=await navigator.mediaDevices.getUserMedia({audio:true}),mt=['audio/webm;codecs=opus','audio/ogg;codecs=opus','audio/mp4','audio/webm','audio/ogg','audio/wav'].find(ty=>MediaRecorder.isTypeSupported(ty));if(!mt){alert("无支持录音格式。");return;}mediaRecorder=new MediaRecorder(st,{mimeType:mt});mediaRecorder.ondataavailable=ev=>{if(ev.data.size>0)audioChunks.push(ev.data);};mediaRecorder.onstop=()=>{if(audioChunks.length===0){v.textContent="未录到音频。";s.disabled=false;t.disabled=true;st.getTracks().forEach(tr=>tr.stop());return;}sendVoiceToServer(new Blob(audioChunks,{type:mediaRecorder.mimeType}));audioChunks=[];st.getTracks().forEach(tr=>tr.stop());};mediaRecorder.onerror=ev=>{alert(`录音出错:${ev.error.name||'未知'}`);s.disabled=false;t.disabled=true;if(v)v.textContent='录音错误。';try{st.getTracks().forEach(tr=>tr.stop());}catch(ex){}};mediaRecorder.start();s.disabled=true;t.disabled=false;v.innerHTML='<i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中...';}catch(er){alert(`无法访问麦克风:${er.message}`);s.disabled=false;t.disabled=true;}});t.addEventListener('click',()=>{if(mediaRecorder?.state==='recording')mediaRecorder.stop();s.disabled=false;t.disabled=true;});}
+
+function initVoiceFeature() {
+    const startRecordingBtn = document.getElementById('voice-start-recording');
+    const stopRecordingBtn = document.getElementById('voice-stop-recording');
+    const voiceResultEl = document.getElementById('voice-result');
+
+    // 检查浏览器是否支持录音功能
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+        if (startRecordingBtn) startRecordingBtn.disabled = true;
+        if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+        if (voiceResultEl) voiceResultEl.textContent = '抱歉，您的浏览器不支持录音功能。';
+        console.warn("Browser does not support MediaRecorder or getUserMedia.");
+        return;
+    }
+
+    // 确保所有必要的元素都存在
+    if (!startRecordingBtn || !stopRecordingBtn || !voiceResultEl) {
+        console.error("Voice feature UI elements not found (start/stop button or result area).");
+        return;
+    }
+
+    // “开始录音”按钮的事件监听器
+    startRecordingBtn.addEventListener('click', async () => {
+        audioChunks = []; // 清空之前的音频片段
+
+        // 禁用开始按钮，启用停止按钮，更新UI为录音状态
+        startRecordingBtn.disabled = true;
+        stopRecordingBtn.disabled = false;
+        if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中...</p>`;
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            // 尝试找到浏览器支持的音频格式
+            const mimeTypes = [
+                'audio/webm;codecs=opus',
+                'audio/ogg;codecs=opus',
+                'audio/mp4', // 有些浏览器可能支持mp4容器的AAC或Opus
+                'audio/webm', // 通用webm
+                'audio/ogg',  // 通用ogg
+                // 'audio/wav' // MediaRecorder对WAV的直接支持较少，通常需要后期转换
+            ];
+            const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
+
+            if (!supportedMimeType) {
+                alert("未找到浏览器支持的录音格式。");
+                console.error("No supported MIME type found for MediaRecorder.");
+                startRecordingBtn.disabled = false;
+                stopRecordingBtn.disabled = true;
+                if (voiceResultEl) voiceResultEl.textContent = '录音格式不受支持。';
+                stream.getTracks().forEach(track => track.stop()); // 关闭媒体流
+                return;
+            }
+            console.log("[VOICE] Using MIME type:", supportedMimeType);
+
+            mediaRecorder = new MediaRecorder(stream, { mimeType: supportedMimeType });
+
+            // *** 生成并设置当前语音请求的唯一ID ***
+            window.currentVoiceRequestId = generateUUID();
+            console.log('[VOICE] New currentVoiceRequestId set:', window.currentVoiceRequestId);
+            // 更新UI，可以包含部分ID用于调试
+            if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中... (ID: ${window.currentVoiceRequestId.substring(0,8)})</p>`;
+
+
+            mediaRecorder.ondataavailable = event => {
+                if (event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                console.log("[VOICE] Recording stopped. Audio chunks count:", audioChunks.length);
+                // 确保媒体流被关闭，释放麦克风
+                stream.getTracks().forEach(track => track.stop());
+
+                if (audioChunks.length === 0) {
+                    if (voiceResultEl) voiceResultEl.textContent = "未录到有效音频。";
+                    console.warn("[VOICE] No audio chunks recorded.");
+                    startRecordingBtn.disabled = false;
+                    stopRecordingBtn.disabled = true;
+                    return;
+                }
+
+                const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                sendVoiceToServer(audioBlob); // sendVoiceToServer 内部会设置 "处理中..."
+                audioChunks = []; // 清空，为下次录音准备
+
+                // 按钮状态的最终控制权在 sendVoiceToServer 成功或失败，以及Socket.IO事件回调中
+                // 这里可以暂时保持“停止录音”为禁用，因为处理已经开始
+                // startRecordingBtn.disabled = true; // 保持禁用，直到处理完成或失败
+                // stopRecordingBtn.disabled = true;  // 已经停止，禁用它
+            };
+
+            mediaRecorder.onerror = event => {
+                console.error("[VOICE] MediaRecorder error:", event.error);
+                alert(`录音出错: ${event.error.name || '未知错误'}`);
+                stream.getTracks().forEach(track => track.stop()); // 关闭媒体流
+                if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">录音错误: ${escapeHtml(event.error.name || '未知错误')}</p>`;
+                startRecordingBtn.disabled = false;
+                stopRecordingBtn.disabled = true;
+                window.currentVoiceRequestId = null; // 出错时清空ID
+            };
+            
+            mediaRecorder.start(); // 开始录音
+
+        } catch (error) {
+            console.error("[VOICE] Error starting recording or getting media:", error);
+            alert(`无法访问麦克风或启动录音: ${error.message}`);
+            if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">麦克风访问失败: ${escapeHtml(error.message)}</p>`;
+            startRecordingBtn.disabled = false;
+            stopRecordingBtn.disabled = true;
+            window.currentVoiceRequestId = null; // 出错时清空ID
+        }
+    });
+
+    // “停止录音”按钮的事件监听器
+    stopRecordingBtn.addEventListener('click', () => {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            console.log("[VOICE] Stop recording button clicked.");
+            mediaRecorder.stop(); // 这会触发 mediaRecorder.onstop
+        }
+        // 按钮状态的更新主要由 onstop 和 onerror 控制，以及后续的Socket.IO事件
+        // stopRecordingBtn.disabled = true; // 立即禁用，防止重复点击
+        // startRecordingBtn.disabled = false; // 暂时不启用，等待处理结果
+    });
+
+    // 语音模块历史记录清除按钮 (如果这个逻辑不在这里，确保它在别处正确初始化)
+    document.getElementById('voice-clear-history')?.addEventListener('click', clearVoiceHistory);
+}
 
 function initVoiceAnswerHandlers(){ initVoiceFeature(); document.getElementById('voice-clear-history')?.addEventListener('click',clearVoiceHistory); }
 
@@ -936,6 +1920,9 @@ function initAllFeatures() {
     else console.warn('Token meta tag missing.');
 
     initMarkdownRenderer();
+    initSidebarToggle(); // <--- 在这里调用侧边栏切换的初始化
+
+    getApiInfo(); // 调用 getApiInfo 来通过 fetch 获取信息
 
     // KaTeX JS 和 CSS 已经通过 import 导入，renderMathInElement 函数现在可以直接使用。
     // 我们可以在这里渲染页面加载时已经存在的任何包含 LaTeX 的内容。

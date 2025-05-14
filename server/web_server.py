@@ -684,42 +684,82 @@ def crop_image():
 
 @app.route('/process_voice', methods=['POST'])
 def process_voice():
-    check_token()
+    check_token() # 假设 check_token 函数已定义
     log.info("Request /process_voice (async).")
-    request_id = str(uuid.uuid4())
+
+    # --- 1. 从前端获取 request_id (首选) ---
+    client_provided_request_id = request.form.get('request_id')
+    
+    if client_provided_request_id:
+        request_id_to_use = client_provided_request_id
+        log.info(f"[Req {request_id_to_use}] Using 'request_id' provided by client: {request_id_to_use}")
+    else:
+        # 如果前端没有发送 request_id，后端生成一个。
+        # 这应该是一个异常情况，因为我们期望前端总是生成并发送它。
+        request_id_to_use = str(uuid.uuid4())
+        log.warning(f"Client did not provide 'request_id' in /process_voice form data. Generated a new one server-side: {request_id_to_use}. This might lead to event matching issues if client expects a different ID.")
+    
+    # --- 2. 处理音频文件 ---
     if 'audio' not in request.files:
-        return jsonify({'error': 'Missing audio file', 'request_id': request_id}), 400
+        log.error(f"[Req {request_id_to_use}] Missing audio file in request.")
+        return jsonify({'error': 'Missing audio file', 'request_id': request_id_to_use}), 400
 
     audio_file = request.files['audio']
-    if not audio_file.filename:
-        original_filename = f"audio_{int(time.time() * 1000)}.wav"
+    
+    # 安全地处理文件名
+    original_filename_base = "audio_file" # 默认基本名
+    if audio_file.filename:
+        original_filename_base = secure_filename(audio_file.filename)
+        # 可以进一步去除扩展名，如果你只想用原始文件名作为基础
+        # original_filename_base = Path(original_filename_base).stem 
     else:
-        original_filename = secure_filename(audio_file.filename)
+        log.warning(f"[Req {request_id_to_use}] Audio file uploaded without a filename.")
 
-    temp_filename = f'voice_{int(time.time() * 1000)}_{original_filename}'
+    # 构建包含时间戳和部分 request_id 的临时文件名，以增加唯一性
+    timestamp_ms_str = str(int(time.time() * 1000))
+    # 使用 request_id_to_use 的前8位，如果它存在
+    req_id_prefix = request_id_to_use[:8] if request_id_to_use else "unknownreq"
+    
+    # 确保 original_filename_base 是一个安全的文件名部分
+    # 如果原始文件名可能包含路径或非法字符，secure_filename 应该已经处理了
+    # 但为了更安全，可以限制其长度或进一步清理
+    safe_original_base = "".join(c if c.isalnum() or c in ['_', '-'] else '_' for c in original_filename_base[:50])
+
+
+    temp_filename = f'voice_{timestamp_ms_str}_{req_id_prefix}_{safe_original_base}.wav' # 假设统一保存为 .wav 供 STT
     temp_path = SAVE_DIR / temp_filename
 
-    log.debug(f"[Req {request_id}] Saving temp voice file: {temp_path}")
+    log.debug(f"[Req {request_id_to_use}] Attempting to save temp voice file to: {temp_path}")
     try:
         audio_file.save(str(temp_path))
-        log.info(f"[Req {request_id}] Temp voice file saved: {temp_path}")
+        log.info(f"[Req {request_id_to_use}] Temp voice file saved successfully: {temp_path}")
     except Exception as e:
-        log.exception(f"[Req {request_id}] Failed save temp voice file")
-        return jsonify({'error': f'保存语音文件失败: {str(e)}', 'request_id': request_id}), 500
+        log.exception(f"[Req {request_id_to_use}] Failed to save temp voice file at {temp_path}")
+        return jsonify({'error': f'保存语音文件失败: {str(e)}', 'request_id': request_id_to_use}), 500
 
-    log.info(f"[Req {request_id}] Starting voice processing task: {temp_path.name}")
+    # --- 3. 获取前端发送的 socket_id (可选) ---
+    client_socket_id = request.form.get('socket_id')
+    if client_socket_id:
+        log.info(f"[Req {request_id_to_use}] Received 'socket_id' from client: {client_socket_id}")
+    else:
+        log.info(f"[Req {request_id_to_use}] 'socket_id' not provided by client. Socket.IO events will be broadcast if sid is None in task.")
+
+    # --- 4. 启动后台任务 ---
+    log.info(f"[Req {request_id_to_use}] Starting voice processing background task: {temp_path.name} for SID: {client_socket_id or 'None (will broadcast)'}")
     socketio.start_background_task(
-        target=_task_process_voice,
+        target=_task_process_voice,     # 确保 _task_process_voice 函数已定义
         temp_audio_path=temp_path,
-        request_id=request_id,
-        sid=None
+        request_id=request_id_to_use,   # <--- 使用从前端获取(或后备生成)的 request_id
+        sid=client_socket_id            # <--- 使用从前端获取的 socket_id (如果存在)
     )
-    log.info(f"[Req {request_id}] Voice upload accepted, processing started.")
+    
+    log.info(f"[Req {request_id_to_use}] Voice upload accepted by server, background processing initiated.")
+    # --- 5. 返回 HTTP 202 Accepted 响应 ---
     return jsonify({
         'status': 'processing',
         'message': '语音已接收，正在后台处理...',
-        'request_id': request_id,
-        'temp_filename': temp_path.name
+        'request_id': request_id_to_use,   # <--- 在响应中返回这个 request_id
+        'temp_filename': temp_path.name  # 可以返回临时文件名用于调试
     }), 202
 
 @app.route('/chat', methods=['POST'])

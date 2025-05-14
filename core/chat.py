@@ -472,73 +472,137 @@ def _chat_gemini(prompt: str, history: Optional[List[Dict[str, Any]]] = None) ->
     代理通过环境变量 HTTP_PROXY/HTTPS_PROXY 配置。
     """
     if not settings.gemini_api_key:
-        raise ValueError("Gemini API key not configured.")
+        # It's better to raise a more specific error or handle it gracefully
+        # so the caller (chat_only) can return a proper error message to the UI.
+        log.error("Gemini API key not configured.")
+        raise ValueError("Gemini API key not configured.") # Or return an error string
 
-    # --- 移除显式的代理配置 ---
-    # proxies = settings.get_proxy_dict() # 不再需要调用这个方法获取字典
-    # genai.configure(
-    #    api_key=settings.gemini_api_key,
-    #    transport='rest',
-    #    client_options={"proxies": proxies} if proxies else None # <--- 删除这行或将其注释掉
-    # )
-    # --- End 移除 ---
-
-    # --- 简化配置：库应自动读取环境变量 ---
-    # 只需要配置 API Key。代理会从环境变量读取。
-    # 确保环境变量已通过 settings.py 中的 load_dotenv 加载
-    genai.configure(api_key=settings.gemini_api_key)
-    # transport='rest' 可能不再需要显式设置，库会选择合适的
-    # 如果遇到问题，可以尝试加回 transport='rest'
-    # genai.configure(api_key=settings.gemini_api_key, transport='rest')
-
-    # 确认环境变量是否真的设置了（可选的调试日志）
-    # log.debug(f"Gemini Check - HTTP_PROXY env var: {os.getenv('HTTP_PROXY')}")
-    # log.debug(f"Gemini Check - HTTPS_PROXY env var: {os.getenv('HTTPS_PROXY')}")
+    # API Key configuration should ideally be done once at application startup.
+    # If genai.configure is called múltiplas vezes, it's generally fine but not optimal.
+    try:
+        genai.configure(api_key=settings.gemini_api_key)
+    except Exception as e:
+        log.error(f"Failed to configure Gemini API: {e}")
+        raise ConnectionError(f"Failed to configure Gemini API: {e}") from e
 
 
-    # --- 构建 Gemini contents 列表 ---
-    full_conversation = history if history else []
-    if prompt:
-        current_user_content = {'role': 'user', 'parts': [{'text': prompt}]}
-        full_conversation.append(current_user_content)
-    else:
-         if not full_conversation:
-              log.warning("Gemini chat called with empty prompt and empty history.")
-              return "请输入您的问题。"
+    # --- 构建清理过的 Gemini contents 列表 ---
+    clean_conversation: List[Dict[str, Any]] = [] # Explicitly type for clarity
+    if history:
+        for turn in history:
+            role = turn.get('role')
+            original_parts = turn.get('parts')
+            
+            valid_parts: List[Dict[str, Any]] = [] # Explicitly type
+            if isinstance(original_parts, list):
+                for part in original_parts:
+                    if isinstance(part, dict):
+                        text_content = part.get('text')
+                        # Gemini also supports 'inline_data' for images, etc.
+                        # For a pure text chat, we primarily care about 'text'.
+                        # If 'text' is present and not an empty string (after stripping), it's valid.
+                        if text_content is not None and str(text_content).strip() != "":
+                            valid_parts.append({'text': str(text_content).strip()})
+                        # else: (Optional logging for skipped empty text parts)
+                        #     log.debug(f"Skipping part with empty or None text: {part} in turn: {turn}")
+                    # else: (Optional logging for parts that are not dicts)
+                    #    log.debug(f"Skipping part because it's not a dictionary: {part} in turn: {turn}")
 
-    # --- 配置生成参数 ---
+            elif isinstance(original_parts, str) and original_parts.strip() != "":
+                # Handle cases where 'parts' might be a non-empty string (though not standard Gemini format)
+                valid_parts = [{'text': original_parts.strip()}]
+            
+            if role in ['user', 'model'] and valid_parts:
+                clean_turn = {
+                    'role': role,
+                    'parts': valid_parts
+                }
+                clean_conversation.append(clean_turn)
+            # else: (Optional: log skipped turns due to role/parts issues)
+            #    log.warning(f"Skipping turn due to invalid role, or no valid parts after cleaning: {turn}")
+
+    # --- 处理当前用户的 prompt ---
+    if prompt and prompt.strip() != "":
+        current_user_prompt_text = prompt.strip()
+        current_user_content = {'role': 'user', 'parts': [{'text': current_user_prompt_text}]}
+        
+        # Logic to prevent adding duplicate user message if it's same as the last one in history
+        if not clean_conversation:
+            clean_conversation.append(current_user_content)
+        elif clean_conversation[-1]['role'] == 'user':
+            # If last message was also user, decide what to do.
+            # Option 1: Replace if different, ignore if same.
+            last_user_parts_text = "".join([p.get('text', '') for p in clean_conversation[-1].get('parts', [])])
+            if last_user_parts_text.strip() != current_user_prompt_text:
+                log.info("Last message in history was user, replacing with new different prompt.")
+                clean_conversation[-1] = current_user_content # Replace
+            else:
+                log.info("Current prompt is identical to the last user message in history. Not appending duplicate.")
+        else: # Last message was 'model' or history was empty
+            clean_conversation.append(current_user_content)
+
+    if not clean_conversation:
+        log.warning("Gemini chat called with effectively empty content after cleaning history and prompt.")
+        return "无法处理请求，对话内容为空或无效。" 
+
+    log.info(f"调用 Gemini Chat ({DEFAULT_MODEL_GEMINI})... Cleaned Turns: {len(clean_conversation)}")
+    log.debug(f"Cleaned Gemini Contents Payload: {json.dumps(clean_conversation, indent=2, ensure_ascii=False)}")
+    
     gen_cfg = genai.types.GenerationConfig(
         max_output_tokens=2048,
         temperature=0.7
     )
     model = genai.GenerativeModel(DEFAULT_MODEL_GEMINI)
 
-    log.info(f"调用 Gemini Chat ({DEFAULT_MODEL_GEMINI})... Turns: {len(full_conversation)}")
-    # log.debug(f"Gemini Contents Payload: {full_conversation}") # Keep for debugging if needed
-
     try:
         response = model.generate_content(
-            contents=full_conversation,
+            contents=clean_conversation,
             generation_config=gen_cfg,
+            # request_options={"timeout": 120} # Example: Set a timeout for the API call (in seconds)
         )
-        # ... (处理 response 的代码不变) ...
+        
+        # Accessing response.text directly is often simpler if you only expect text.
+        # response.parts is more robust if there could be non-text parts or multiple parts.
+        response_text = ""
         if response.parts:
-             log.debug(f"Gemini response.parts content: {[part.text for part in response.parts]}")
-             response_text = "".join(part.text for part in response.parts)
-        else:
-            response_text = "(AI未能生成有效回复，可能已被安全设置阻止)"
-            log.warning(f"Gemini response missing parts. Finish reason: {response.prompt_feedback}")
+            for part in response.parts:
+                if hasattr(part, 'text'): # Check if the part has a text attribute
+                    response_text += part.text
+            log.debug(f"Gemini response.parts content: {[part.text for part in response.parts if hasattr(part, 'text')]}")
+        elif hasattr(response, 'text') and response.text: # Fallback if .text is directly on response
+             response_text = response.text
+        else: # No text found in parts or directly on response object
+            response_text = "(AI未能生成有效回复，可能已被安全设置阻止或返回空内容)"
+            # Log finish_reason and safety_ratings for more insight
+            finish_reason_str = "N/A"
+            if hasattr(response, 'candidates') and response.candidates:
+                finish_reason_str = str(response.candidates[0].finish_reason)
+                # You can also log safety_ratings here if needed
+            log.warning(f"Gemini response missing parts or text. Finish reason: {finish_reason_str}. Prompt feedback: {response.prompt_feedback if hasattr(response, 'prompt_feedback') else 'N/A'}")
 
-        log.info("Gemini Chat 调用成功。")
+
+        log.info("Gemini Chat 调用成功 (或API调用完成但可能无有效内容).")
         return response_text.strip()
 
-    except Exception as e:
+    except google.api_core.exceptions.InvalidArgument as e:
+        log.error(f"Gemini API InvalidArgument error: {e}", exc_info=True)
+        # This specific error "empty text parameter" should be caught by the cleaning logic now.
+        # If it still occurs, it means some part's text is still empty.
+        if "empty text parameter" in str(e):
+            return "提交给AI的请求中包含了空的文本内容，请检查历史记录或当前输入。"
+        return f"AI请求参数错误: {e}"
+    except google.api_core.exceptions.GoogleAPIError as e: # Catch more general Google API errors
         log.error(f"Gemini API error: {e}", exc_info=True)
-        # 可以添加更具体的错误类型检查，比如 google.api_core.exceptions.PermissionDenied
-        if "API key not valid" in str(e):
-             return "Gemini API Key 无效，请检查配置。"
-        # 其他通用错误
-        raise # Re-raise the exception
+        if "API key not valid" in str(e) or "PERMISSION_DENIED" in str(e).upper():
+             return "Gemini API Key 无效或权限不足，请检查配置。"
+        # Add more specific error handling based on common GoogleAPIError types if needed
+        return f"调用 Gemini 服务时发生错误: {type(e).__name__}"
+    except Exception as e: # Catch any other unexpected errors
+        log.error(f"Unexpected error during Gemini API call: {e}", exc_info=True)
+        # Re-raise or return a generic error message
+        # Depending on your design, you might want to re-raise to be caught by chat_only
+        raise # Or return "调用AI时发生未知内部错误。"
+
 
 
 
