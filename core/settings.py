@@ -1,37 +1,36 @@
-
 # core/settings.py
 from __future__ import annotations
-import logging
+import logging # <--- 确保 logging 在最前面导入
 import json
-import os # <-- 确保导入 os (虽然可能已被 dotenv 加载，但明确导入更好)
-from typing import List 
+import os
+from typing import List, Dict, Optional, Union # 合并 typing 导入
 from pathlib import Path
-from typing import Dict, Optional, Union # <-- 确保导入 Dict, Optional, Union
 from dotenv import load_dotenv
 
-# --- httpx 导入，用于 OpenAI 代理 ---
+# --- httpx 导入 ---
 try:
     import httpx
 except ImportError:
-    # 提供一个友好的提示，如果 httpx 未安装
     print("错误：httpx 库未安装。如果需要使用代理访问 OpenAI，请运行 'pip install httpx[http2]'")
-    httpx = None # 设置为 None 以便后续检查
+    httpx = None
 
 # --- 加载 .env 文件 ---
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 if ENV_PATH.exists():
     load_dotenv(ENV_PATH, override=True)
+    # 使用 print 没问题，因为此时 logging 可能还未配置
     print(f"成功加载 .env 文件: {ENV_PATH}")
 else:
     print(f"警告: .env 文件未找到于 {ENV_PATH}")
 
-
 # --- Pydantic 相关导入 ---
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator # field_validator 导入但未使用，可以考虑移除
 
-# --- 日志配置 (如果决定在这里配置) ---
-log = logging.getLogger(__name__) # 获取 logger 实例
+# --- 获取模块级 logger ---
+# 在这里获取 logger 是安全的，因为它在 logging.basicConfig 之前
+# basicConfig 会配置根 logger，这个 logger 会继承其设置
+log = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     # --- Pydantic‑Settings 配置 ---
@@ -43,10 +42,9 @@ class Settings(BaseSettings):
     )
 
     # --- 基础设置 ---
-    server_host: str = Field(default="0.0.0.0", validation_alias='SERVER_HOST') # 修改默认主机设置，使其监听所有网络接口
+    server_host: str = Field(default="0.0.0.0", validation_alias='SERVER_HOST')
     server_port: int = Field(default=5000, validation_alias='SERVER_PORT')
     
-
     # --- 认证 ---
     dashboard_token: str | None = Field(
         default=None,
@@ -57,6 +55,10 @@ class Settings(BaseSettings):
     # --- AI 提供商 API Keys ---
     openai_api_key: str | None = Field(default=None, validation_alias='OPENAI_API_KEY')
     gemini_api_key: str | None = Field(default=None, validation_alias='GEMINI_API_KEY')
+    # 您可能还需要为 Claude 和 Grok 添加 API Key 字段，如果它们需要的话
+    # claude_api_key: str | None = Field(default=None, validation_alias='CLAUDE_API_KEY')
+    # grok_api_key: str | None = Field(default=None, validation_alias='GROK_API_KEY')
+
 
     # --- 功能配置 ---
     image_analysis_provider: str = Field(default="gemini", validation_alias='IMAGE_ANALYSIS_PROVIDER')
@@ -64,17 +66,16 @@ class Settings(BaseSettings):
     # --- 调试模式 ---
     debug_mode: bool = Field(default=False, validation_alias='DEBUG_MODE')
 
-    # --- CORS 设置 ---
-    # cors_allowed_origins = json.loads(os.getenv("CORS_ALLOWED_ORIGINS", "[]"))
-
     # --- 可选网络代理 ---
     http_proxy: str | None = Field(default=None, validation_alias='HTTP_PROXY')
     https_proxy: str | None = Field(default=None, validation_alias='HTTPS_PROXY')
-    # all_proxy: str | None = Field(default=None, validation_alias='ALL_PROXY') # 暂时不用 all_proxy
 
     # 图片优化设置
     image_quality: int = Field(default=85, validation_alias='IMAGE_QUALITY')
     image_max_size: int = Field(default=1920, validation_alias='IMAGE_MAX_SIZE')
+
+    # --- 新增：文本文件处理的最大字符数 ---
+    MAX_TEXT_FILE_CHARS: int = Field(default=4000, validation_alias='MAX_TEXT_FILE_CHARS') # <--- **确保此行已添加**
 
     # 添加外部 URL 设置
     external_url: str | None = Field(
@@ -93,118 +94,99 @@ class Settings(BaseSettings):
     # --- 辅助属性 ---
     @property
     def base_url(self) -> str:
-        """返回基础 URL，优先使用外部 URL"""
         if self.external_url:
-            return self.external_url
-        return f"http://{self.server_host if self.server_host != '0.0.0.0' else '127.0.0.1'}:{self.server_port}"
+            return self.external_url.rstrip('/') # 确保移除尾部斜杠
+        # 确保 server_host 和 server_port 是字符串或可以转换
+        host = str(self.server_host if self.server_host != '0.0.0.0' else '127.0.0.1')
+        port = str(self.server_port)
+        return f"http://{host}:{port}"
 
-    # --- 新增：代理辅助方法 ---
-
+    # --- 代理辅助方法 ---
     def get_proxy_dict(self) -> Optional[Dict[str, str]]:
-        """
-        根据配置返回适用于 requests 或 google-generativeai (transport='rest') 的代理字典。
-        优先使用 https_proxy (如果设置了)。
-        """
         proxies = {}
-        # 优先使用 https_proxy 作为 https 的代理
+        # (您的代理逻辑保持不变，但使用 log.debug 而不是 logging.debug)
         if self.https_proxy:
-            # 确保代理地址包含协议头 (http:// 或 https://)
-            # 如果 .env 文件中是 127.0.0.1:port 格式，需要添加 http://
             https_proxy_url = self.https_proxy if "://" in self.https_proxy else f"http://{self.https_proxy}"
             proxies['https'] = https_proxy_url
-            logging.debug(f"Using specific HTTPS proxy: {https_proxy_url}")
-        # 如果设置了 http_proxy，用它作为 http 和 https (除非 https 已被专门设置)
+            log.debug(f"Using specific HTTPS proxy: {https_proxy_url}")
         if self.http_proxy:
             http_proxy_url = self.http_proxy if "://" in self.http_proxy else f"http://{self.http_proxy}"
-            # 只有在 https 代理未被 https_proxy 设置时，才使用 http_proxy 作为 https 代理
             proxies.setdefault('https', http_proxy_url)
             proxies['http'] = http_proxy_url
-            logging.debug(f"Using HTTP proxy: {http_proxy_url} (may also apply to HTTPS if not overridden)")
-
-        # log.debug(f"Generated proxy dict for requests/Gemini: {proxies if proxies else 'None'}")
+            log.debug(f"Using HTTP proxy: {http_proxy_url} (may also apply to HTTPS if not overridden)")
         return proxies if proxies else None
 
-    def get_httpx_client(self) -> Optional[httpx.Client]:
-        """
-        根据配置创建并返回一个配置了代理的 httpx.Client 实例，
-        用于传递给 openai 库。如果未设置代理或 httpx 未安装，则返回 None。
-        """
-        if httpx is None: # 检查 httpx 是否成功导入
-             logging.warning("httpx library not installed, cannot configure proxy for OpenAI.")
+    def get_httpx_client(self) -> Optional[httpx.Client]: # type: ignore
+        if httpx is None:
+             log.warning("httpx library not installed, cannot configure proxy for OpenAI.")
              return None
-
         proxies_for_httpx = {}
-        # httpx 需要代理 URL 包含 scheme (http:// 或 https://)
-        # httpx 的格式是 'http://': 'http://proxy...', 'https://': 'http://proxy...'
         if self.http_proxy:
             http_proxy_url = self.http_proxy if "://" in self.http_proxy else f"http://{self.http_proxy}"
             proxies_for_httpx['http://'] = http_proxy_url
-            # 如果没有专门的 https 代理，http 代理通常也用于 https 请求
             proxies_for_httpx.setdefault('https://', http_proxy_url)
-            logging.debug(f"Using HTTP proxy for httpx: {http_proxy_url}")
         if self.https_proxy:
             https_proxy_url = self.https_proxy if "://" in self.https_proxy else f"http://{self.https_proxy}"
-            proxies_for_httpx['https://'] = https_proxy_url # 覆盖 https
-            logging.debug(f"Using specific HTTPS proxy for httpx: {https_proxy_url}")
-
-
+            proxies_for_httpx['https://'] = https_proxy_url
         if not proxies_for_httpx:
-            # log.debug("No proxies configured, returning None for httpx client.")
-            return None # 没有代理，返回 None，OpenAI 库将使用默认 client
-
+            return None
         log.info(f"Creating httpx client with proxies for keys: {list(proxies_for_httpx.keys())}")
         try:
-            # 可以添加超时等其他配置
-            timeout = httpx.Timeout(10.0, read=60.0, connect=10.0) # 增加读取超时
-            # mounts 参数可用于更精细控制 http/https 代理，但 proxies 通常足够
-            # mounts = {
-            #    "http://": httpx.HTTPTransport(proxy=proxies_for_httpx.get("http://")),
-            #    "https://": httpx.HTTPTransport(proxy=proxies_for_httpx.get("https://"))
-            # }
-            return httpx.Client(proxies=proxies_for_httpx, timeout=timeout, follow_redirects=True)
+            timeout = httpx.Timeout(10.0, read=60.0, connect=10.0) # type: ignore
+            return httpx.Client(proxies=proxies_for_httpx, timeout=timeout, follow_redirects=True) # type: ignore
         except Exception as e:
             log.error(f"Failed to create httpx client with proxies: {e}", exc_info=True)
-            return None # 创建失败也返回 None
-
+            return None
 
     # --- 验证器 ---
-    @field_validator("image_analysis_provider")
-    @classmethod
-    def _norm_provider(cls, v: str) -> str:
-        """验证并规范化 image_analysis_provider 字段"""
-        if not isinstance(v, str):
-             raise ValueError("image_analysis_provider must be a string")
-        v = v.lower().strip()
-        allowed_providers = {"openai", "gemini"}
-        if v not in allowed_providers:
-            raise ValueError(f"image_analysis_provider must be one of {allowed_providers}")
-        return v
+    # @field_validator("image_analysis_provider") # 如果不实际使用 field_validator 装饰器，可以移除它
+    # @classmethod
+    # def _norm_provider(cls, v: str) -> str:
+    #     """验证并规范化 image_analysis_provider 字段"""
+    #     # (您的验证逻辑可以保留，但确保它与 core.constants.ModelProvider 中的键一致)
+    #     # 例如，您可能希望允许 "openai", "gemini", "claude", "grok"
+    #     if not isinstance(v, str):
+    #          raise ValueError("image_analysis_provider must be a string")
+    #     v_lower = v.lower().strip()
+    #     # from core.constants import ModelProvider # 动态检查
+    #     # allowed_providers = {getattr(ModelProvider, attr) for attr in dir(ModelProvider) if not attr.startswith("__")}
+    #     allowed_providers_simple = {"openai", "gemini", "claude", "grok"} # 手动维护或从 ModelProvider 构建
+    #     if v_lower not in allowed_providers_simple:
+    #         log.warning(f"IMAGE_ANALYSIS_PROVIDER ('{v}') not in {allowed_providers_simple}. Ensure core logic handles it.")
+    #         # Consider raising ValueError if strict validation is needed
+    #     return v_lower
 
-# --- 创建全局 settings 实例 ---
+# --- 创建全局 settings 实例 和 配置日志 ---
 try:
-    settings = Settings()
-    # 配置日志 (可选，但建议在此处根据 debug_mode 配置一次)
+    settings = Settings() # 创建实例
+
+    # 日志配置应该在获取 logger 实例之后，并且在第一次使用 log.info() 等之前
+    # 将其移到 settings 实例成功创建之后
     log_level = logging.DEBUG if settings.debug_mode else logging.INFO
-    # 移除或注释掉 web_server.py 中的 basicConfig 调用，避免冲突
     logging.basicConfig(
         level=log_level,
-        format="%(asctime)s [%(levelname)-8s] %(name)-15s: %(message)s", # 更详细的格式
-        datefmt="%Y-%m-%d %H:%M:%S"
+        format="%(asctime)s [%(levelname)-8s] %(name)-25s L%(lineno)-4d %(funcName)-20s : %(message)s", # 调整格式
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True # 强制覆盖根logger的任何现有处理器
     )
-    # 获取根 logger 并设置级别 (basicConfig 可能不够用时)
-    # logging.getLogger().setLevel(log_level)
-    logging.info(f"Settings loaded successfully. Debug mode: {settings.debug_mode}")
-    logging.info(f"Image analysis provider: {settings.image_analysis_provider}")
-    logging.info(f"HTTP Proxy: {settings.http_proxy or 'Not set'}")
-    logging.info(f"HTTPS Proxy: {settings.https_proxy or 'Not set'}")
+    # 现在可以安全地使用 log 对象记录信息
+    log.info(f"Settings loaded successfully. Debug mode: {settings.debug_mode}")
+    log.info(f"Image analysis provider: {settings.image_analysis_provider}")
+    log.info(f"HTTP Proxy: {settings.http_proxy or 'Not set'}")
+    log.info(f"HTTPS Proxy: {settings.https_proxy or 'Not set'}")
+    log.info(f"MAX_TEXT_FILE_CHARS from settings: {settings.MAX_TEXT_FILE_CHARS}") # 确认加载
 
 except Exception as e:
-    logging.basicConfig(level=logging.ERROR) # 确保至少有错误日志输出
+    # 如果 Settings() 初始化失败，logging 可能还未完全配置，所以使用 print 作为后备
+    print(f"CRITICAL: Failed to initialize settings or logging: {e}")
+    # 尝试用最基本的方式记录错误
+    logging.basicConfig(level=logging.ERROR, format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s", force=True)
     logging.error(f"CRITICAL: Failed to initialize settings: {e}", exc_info=True)
-    raise SystemExit(f"Failed to load settings: {e}") # 启动失败直接退出
+    raise SystemExit(f"Failed to load settings: {e}")
 
 # --- 用于直接运行此文件进行测试 ---
 if __name__ == "__main__":
+    # (您的 __main__ 测试代码保持不变)
     import pprint
     print("\n--- Loaded Settings (via model_dump) ---")
     pprint.pp(settings.model_dump())
@@ -213,10 +195,12 @@ if __name__ == "__main__":
     httpx_client = settings.get_httpx_client()
     print(f"get_httpx_client() returns: {'Client object with proxies' if httpx_client else 'None'}")
     if httpx_client:
-        print(f"  - httpx client proxies: {httpx_client.proxies}")
+        print(f"  - httpx client proxies: {httpx_client.proxies}") # type: ignore
 
     print("\n--- Environment Variable Check ---")
     print(f".env file path used: {ENV_PATH}")
     print(f"DEBUG_MODE from env: {os.getenv('DEBUG_MODE')}")
     print(f"HTTP_PROXY from env: {os.getenv('HTTP_PROXY')}")
     print(f"HTTPS_PROXY from env: {os.getenv('HTTPS_PROXY')}")
+    print(f"MAX_TEXT_FILE_CHARS from env: {os.getenv('MAX_TEXT_FILE_CHARS')}") # 检查环境变量
+    print(f"MAX_TEXT_FILE_CHARS from settings object: {settings.MAX_TEXT_FILE_CHARS}") # 检查Pydantic加载的值

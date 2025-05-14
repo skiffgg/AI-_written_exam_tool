@@ -30,8 +30,16 @@ let mediaRecorder; // For voice recording
 let audioChunks = []; // Store audio data chunks
 let chatSessions = []; // Stores all chat session objects {id, title, history}
 let currentChatSessionId = null; // ID of the currently active session
+let availableModels = {}; // To store models fetched from backend
+let selectedModel = {     // To store the currently selected model
+    provider: null,       // e.g., "openai"
+    model_id: null        // e.g., "gpt-4o"
+};
 
 let md = null; // Markdown-it instance
+const THEME_STORAGE_KEY = 'selectedAppTheme'; // 您可以选择一个合适的键名
+const MODEL_SELECTOR_STORAGE_KEY_PROVIDER = 'selectedProvider';
+const MODEL_SELECTOR_STORAGE_KEY_MODEL_ID = 'selectedModelId';
 
 // --- Utility Functions ---
 function debugLog(message) {
@@ -84,6 +92,441 @@ function preprocessTextForRendering(text) {
 
     return processedText;
 }
+
+async function fetchAndPopulateModels() {
+    const modelSelectorEl = document.getElementById('model-selector');
+    const apiProviderDisplayEl = document.getElementById('api-provider-display');
+
+    if (!modelSelectorEl || !apiProviderDisplayEl) {
+        console.error("Model selector or API provider display element not found in the DOM.");
+        if (modelSelectorEl) modelSelectorEl.innerHTML = '<option value="">Error: UI Missing</option>';
+        if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: UI错误';
+        return;
+    }
+
+    modelSelectorEl.innerHTML = '<option value="">正在加载模型...</option>';
+    apiProviderDisplayEl.textContent = 'AI模型: 加载中...';
+    apiProviderDisplayEl.title = '正在从服务器获取可用模型列表';
+
+    try {
+        const response = await fetch('/api/available_models', {
+            headers: {
+                // Assuming TOKEN is a global variable holding your auth token
+                ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` })
+            }
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`获取模型列表失败: ${response.status} ${response.statusText}. ${errorText}`);
+        }
+        availableModels = await response.json(); // Expected: { "openai": {"gpt-4o": "OpenAI GPT-4o"}, ... }
+        
+        if (Object.keys(availableModels).length === 0) {
+            modelSelectorEl.innerHTML = '<option value="">无可用模型</option>';
+            apiProviderDisplayEl.textContent = 'AI模型: 无可用';
+            console.warn("No available models received from the backend.");
+            return;
+        }
+        
+        console.log("Available models loaded:", availableModels);
+        modelSelectorEl.innerHTML = ''; // Clear "loading" message
+
+        const lastSelectedProvider = localStorage.getItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER);
+        const lastSelectedModelId = localStorage.getItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID);
+        let isLastSelectedModelStillAvailable = false;
+
+        for (const providerKey in availableModels) {
+            if (Object.prototype.hasOwnProperty.call(availableModels, providerKey)) {
+                const providerModels = availableModels[providerKey];
+                if (Object.keys(providerModels).length === 0) continue; // Skip empty providers
+
+                const optgroup = document.createElement('optgroup');
+                // Attempt to create a friendlier display name for the provider
+                let providerDisplayName = providerKey.charAt(0).toUpperCase() + providerKey.slice(1);
+                if (providerKey.toLowerCase() === "openai") providerDisplayName = "OpenAI";
+                else if (providerKey.toLowerCase() === "gemini") providerDisplayName = "Google Gemini";
+                else if (providerKey.toLowerCase() === "claude") providerDisplayName = "Anthropic Claude";
+                else if (providerKey.toLowerCase() === "grok") providerDisplayName = "xAI Grok";
+                optgroup.label = providerDisplayName;
+
+                for (const modelId in providerModels) {
+                    if (Object.prototype.hasOwnProperty.call(providerModels, modelId)) {
+                        const modelDisplayName = providerModels[modelId];
+                        const option = document.createElement('option');
+                        // Store provider and model_id in a single value for simplicity,
+                        // or use dataset attributes as you prefer.
+                        option.value = `${providerKey}:${modelId}`;
+                        option.textContent = modelDisplayName;
+                        // Store in dataset for easier access on change
+                        option.dataset.provider = providerKey;
+                        option.dataset.modelId = modelId;
+
+                        if (providerKey === lastSelectedProvider && modelId === lastSelectedModelId) {
+                            option.selected = true;
+                            isLastSelectedModelStillAvailable = true;
+                        }
+                        optgroup.appendChild(option);
+                    }
+                }
+                modelSelectorEl.appendChild(optgroup);
+            }
+        }
+
+        if (modelSelectorEl.options.length === 0) {
+            modelSelectorEl.innerHTML = '<option value="">无可用模型</option>';
+            apiProviderDisplayEl.textContent = 'AI模型: 无可用';
+            selectedModel.provider = null;
+            selectedModel.model_id = null;
+        } else if (isLastSelectedModelStillAvailable) {
+            // Trigger change to set selectedModel and update display for the stored selection
+            handleModelSelectionChange({ target: modelSelectorEl });
+        } else {
+            // If no stored selection or stored selection is no longer available, select the first option
+            modelSelectorEl.selectedIndex = 0;
+            handleModelSelectionChange({ target: modelSelectorEl });
+        }
+
+        modelSelectorEl.addEventListener('change', handleModelSelectionChange);
+
+    } catch (error) {
+        console.error("Error fetching or populating models:", error);
+        modelSelectorEl.innerHTML = '<option value="">加载模型失败</option>';
+        apiProviderDisplayEl.textContent = 'AI模型: 加载失败';
+        apiProviderDisplayEl.title = `错误: ${error.message}`;
+    }
+}
+
+/**
+ * Handles the change event of the model selector.
+ * Updates the global selectedModel object and the UI display.
+ */
+function handleModelSelectionChange(event) {
+    const selector = event.target;
+    const selectedOption = selector.options[selector.selectedIndex];
+
+    if (selectedOption && selectedOption.dataset.provider && selectedOption.dataset.modelId) {
+        selectedModel.provider = selectedOption.dataset.provider;
+        selectedModel.model_id = selectedOption.dataset.modelId;
+
+        localStorage.setItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER, selectedModel.provider);
+        localStorage.setItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID, selectedModel.model_id);
+
+        const apiProviderDisplayEl = document.getElementById('api-provider-display');
+        if (apiProviderDisplayEl) {
+            const modelDisplayName = selectedOption.textContent;
+            // Get provider display name from optgroup label
+            const providerDisplayName = selectedOption.parentElement.label || selectedModel.provider.toUpperCase();
+            apiProviderDisplayEl.textContent = `AI模型: ${modelDisplayName}`;
+            apiProviderDisplayEl.title = `当前模型: ${modelDisplayName} (来自 ${providerDisplayName})`;
+        }
+        console.log("Model selected:", JSON.stringify(selectedModel));
+        
+        // Optional: You could emit an event to the server if it needs to know about the change immediately
+        // if (socket && socket.connected) {
+        // socket.emit('ui_model_changed', { provider: selectedModel.provider, model_id: selectedModel.model_id });
+        // }
+    } else {
+        // Handle empty or invalid selection if necessary
+        selectedModel.provider = null;
+        selectedModel.model_id = null;
+        const apiProviderDisplayEl = document.getElementById('api-provider-display');
+        if (apiProviderDisplayEl) {
+            apiProviderDisplayEl.textContent = 'AI模型: 请选择';
+            apiProviderDisplayEl.title = '请从下拉列表中选择一个AI模型';
+        }
+        console.warn("Invalid model selection or no model selected.");
+    }
+}
+
+
+// --- Modify initAllFeatures to call fetchAndPopulateModels ---
+// function initAllFeatures() {
+//     console.log("--- Initializing All Features ---");
+//     const tokenMeta = document.querySelector('meta[name="token"]');
+//     if (tokenMeta?.content) {
+//         TOKEN = tokenMeta.content;
+//         console.log("Token loaded from meta tag:", TOKEN ? "Present" : "Empty/Not Present");
+//     } else {
+//         console.warn('Token meta tag missing or empty. Some features might not work.');
+//     }
+
+//     initMarkdownRenderer(); // Assuming this is defined elsewhere in your file
+//     initSidebarToggle();    // Assuming defined
+//     initThemeSelector();    // Assuming defined
+
+//     // *** NEW: Fetch and populate models ***
+//     fetchAndPopulateModels(); // Call the new function
+
+//     // ... (KaTeX, BaseButtonHandlers, Tabs, Screenshot, AI Chat, Voice handlers init) ...
+//     if (typeof renderLatexInElement === 'function') { /* ... */ } // Assuming defined
+//     initBaseButtonHandlers();       // Assuming defined
+//     initTabs();                     // Assuming defined
+//     initScreenshotAnalysisHandlers(); // Assuming defined
+//     initAiChatHandlers();           // Assuming defined
+//     initVoiceAnswerHandlers();      // Assuming defined
+    
+//     initSocketIO(); // Socket.IO initialization
+
+//     console.log("--- Application initialization complete ---");
+// }
+
+// --- Modify functions that send data to the backend ---
+
+// Example: Modify sendChatMessage
+// function sendChatMessage() {
+//     const chatInputEl = document.getElementById('chat-chat-input');
+//     const chatHistoryEl = document.getElementById('chat-chat-history');
+
+//     if (!socket || !socket.connected) {
+//         console.error('[Chat] Socket not connected.');
+//         // Consider adding a user-facing error message here
+//         if(chatHistoryEl) {
+//             const errDiv = document.createElement('div');
+//             errDiv.className = 'system-message error-text'; // Add error-text for styling
+//             errDiv.textContent = '错误：无法连接到服务器，请检查网络连接。';
+//             chatHistoryEl.appendChild(errDiv);
+//             scrollToChatBottom(chatHistoryEl);
+//         }
+//         return;
+//     }
+//     if (!chatInputEl || !chatHistoryEl) { console.error("Chat input or history element missing."); return; }
+
+//     const message = chatInputEl.value.trim();
+//     const currentFileToSend = uploadedFile; // From global scope, handled by handleFileUpload
+//     let imageBase64Data = null; // Placeholder for directly pasted/embedded image in chat
+
+//     // TODO: Implement logic here if you allow pasting images directly into chatInputEl
+//     // For now, we'll assume imageBase64Data is null unless explicitly set by such a mechanism.
+//     // If you have an image preview for a pasted image, get its base64 data.
+//     // Example:
+//     // const pastedImagePreview = document.getElementById('pasted-image-preview-in-chat');
+//     // if (pastedImagePreview && pastedImagePreview.src && pastedImagePreview.src.startsWith('data:image')) {
+//     // imageBase64Data = pastedImagePreview.src.split(',')[1];
+//     // }
+
+
+//     if (!message && !currentFileToSend && !imageBase64Data) {
+//         debugLog("Empty message, no file selected, and no pasted image.");
+//         return;
+//     }
+//     if (!selectedModel.provider || !selectedModel.model_id) {
+//         console.warn("No model selected. Please choose a model from the dropdown.");
+//         // Optionally, display a message to the user
+//         if(chatHistoryEl) {
+//             const errDiv = document.createElement('div');
+//             errDiv.className = 'system-message error-text';
+//             errDiv.textContent = '请先从顶部选择一个AI模型。';
+//             chatHistoryEl.appendChild(errDiv);
+//             scrollToChatBottom(chatHistoryEl);
+//         }
+//         return;
+//     }
+
+//     // (Your existing session management logic - unchanged)
+//     let activeSession = currentChatSessionId ? chatSessions.find(s => s.id === currentChatSessionId) : null;
+//     if (!activeSession) {
+//         const newId = Date.now();
+//         let title = message.substring(0, 30) || 
+//                     (imageBase64Data ? "含图片的对话" : null) || 
+//                     (currentFileToSend ? `含${currentFileToSend.name.substring(0, 20)}的对话` : '新对话');
+//         if ((message.length > 30 && title.length ===30) || (currentFileToSend && currentFileToSend.name.length > 20 && title.length >= 22)) title += "...";
+//         activeSession = { id: newId, title: escapeHtml(title), history: [] };
+//         chatSessions.unshift(activeSession);
+//         addChatHistoryItem(activeSession);
+//         currentChatSessionId = newId;
+//         saveCurrentChatSessionId();
+//         setTimeout(() => {
+//             const l = document.getElementById('chat-session-list');
+//             l?.querySelectorAll('.active-session').forEach(i => i.classList.remove('active-session'));
+//             l?.querySelector(`[data-session-id="${activeSession.id}"]`)?.classList.add('active-session');
+//             if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+//         }, 0);
+//     }
+//     // (Add user message to UI and history - largely unchanged, but account for image)
+//     const userMessageText = message || 
+//                             (imageBase64Data ? "[图片已包含在消息中]" : null) || 
+//                             (currentFileToSend ? `[用户上传了文件: ${currentFileToSend.name}]` : "");
+//     if (activeSession && (userMessageText || currentFileToSend || imageBase64Data)) {
+//          activeSession.history.push({ role: 'user', parts: [{ text: userMessageText }] });
+//          // If imageBase64Data exists, your history format might need to store it too,
+//          // or the backend reconstructs it. For now, just text part for user history.
+//     }
+//     // (Display user message in UI - your existing logic)
+//     const uDiv = document.createElement('div'); uDiv.className = 'user-message';
+//     const uStrong = document.createElement('strong'); uStrong.textContent = "您: "; uDiv.appendChild(uStrong);
+//     const uMsgContentDiv = document.createElement('div'); uMsgContentDiv.className = 'message-content';
+//     uMsgContentDiv.textContent = message; // Only display text prompt here
+//     // Display pasted image preview if any (this is a simple text, actual image rendering is complex)
+//     if (imageBase64Data && !currentFileToSend) { // Don't show if it's part of a file upload
+//         const imgInfo = document.createElement('div'); imgInfo.className = 'attached-file';
+//         imgInfo.innerHTML = `<i class="fas fa-image"></i> [已粘贴图片]`;
+//         if (message) uMsgContentDiv.appendChild(document.createElement('br'));
+//         uMsgContentDiv.appendChild(imgInfo);
+//     }
+//     if (currentFileToSend) { // File upload preview
+//         const fD = document.createElement('div'); fD.className = 'attached-file';
+//         fD.innerHTML = `<i class="fas fa-paperclip"></i> ${escapeHtml(currentFileToSend.name)} (${formatFileSize(currentFileToSend.size)})`;
+//         if (message || imageBase64Data) uMsgContentDiv.appendChild(document.createElement('br'));
+//         uMsgContentDiv.appendChild(fD);
+//     }
+//     uDiv.appendChild(uMsgContentDiv);
+//     if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+//     chatHistoryEl.appendChild(uDiv);
+
+
+//     const reqId = generateUUID();
+//     const thinkingDiv = document.createElement('div'); /* ... (your thinking indicator logic) ... */
+//     thinkingDiv.className = 'ai-message ai-thinking';
+//     thinkingDiv.dataset.requestId = reqId;
+//     thinkingDiv.innerHTML = `<i class="fas fa-spinner fa-spin"></i> AI (${selectedModel.provider}/${selectedModel.model_id}) 正在思考...`;
+//     chatHistoryEl.appendChild(thinkingDiv);
+//     scrollToChatBottom(chatHistoryEl);
+
+//     if (activeSession) {
+//          activeSession.history.push({ 
+//              role: 'model', 
+//              parts: [{ text: '' }], 
+//              temp_id: reqId, 
+//              provider: selectedModel.provider, // Store which model was used for this turn
+//              model_id: selectedModel.model_id
+//             });
+//     }
+
+//     const streamToggle = document.getElementById('streaming-toggle-checkbox');
+//     const stream = streamToggle ? streamToggle.checked : true;
+//     let histToSend = activeSession ? JSON.parse(JSON.stringify(activeSession.history.slice(0, -1))) : [];
+
+//     if (currentFileToSend) { // File upload takes precedence over pasted image for this route
+//         const fd = new FormData();
+//         fd.append('prompt', message);
+//         fd.append('file', currentFileToSend, currentFileToSend.name);
+//         fd.append('history', JSON.stringify(histToSend));
+//         fd.append('session_id', activeSession.id);
+//         fd.append('request_id', reqId);
+//         // Add selected model info to the form data for /chat_with_file
+//         fd.append('provider', selectedModel.provider);
+//         fd.append('model_id', selectedModel.model_id);
+//         // use_streaming might not be directly applicable for HTTP file upload's immediate response
+//         // but backend can use it if it decides to stream a subsequent SocketIO message
+
+//         fetch('/chat_with_file', { method: 'POST', headers: { ...(TOKEN && {'Authorization': `Bearer ${TOKEN}`})}, body: fd })
+//             .then(r => { /* ... (your existing fetch response handling) ... */ 
+//                 if (!r.ok) {
+//                     return r.json().catch(() => ({ error: `HTTP Error: ${r.status} ${r.statusText}` }))
+//                                .then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
+//                 }
+//                 return r.json();
+//             })
+//             .then(d => {
+//                 if (d && d.request_id === reqId && d.status === 'processing') {
+//                     console.log(`[File Upload Chat] Request ${reqId} accepted. Waiting for Socket.IO. Model: ${selectedModel.provider}/${selectedModel.model_id}`);
+//                 } else { /* ... error handling ... */ }
+//             })
+//             .catch(e => { /* ... (your existing fetch error handling) ... */ 
+//                 console.error('Chat w/ file fetch error:', e);
+//                 const currentThinkingDivError = chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
+//                 if (currentThinkingDivError) removeThinkingIndicator(chatHistoryEl, currentThinkingDivError);
+//                 // ... (display error in chat)
+//             });
+//     } else { // No file upload, potentially a multimodal chat message (text + pasted image)
+//         socket.emit('chat_message', {
+//             prompt: message,
+//             history: histToSend,
+//             request_id: reqId,
+//             use_streaming: stream,
+//             session_id: activeSession.id,
+//             provider: selectedModel.provider,   // Pass selected provider
+//             model_id: selectedModel.model_id,     // Pass selected model ID
+//             image_data: imageBase64Data     // Pass base64 image data if available
+//         });
+//     }
+    
+//     if(activeSession) saveChatSessionsToStorage(); // Assuming defined
+
+//     // Clear inputs
+//     chatInputEl.value = '';
+//     const upPrevEl = document.getElementById('chat-upload-preview'); if (upPrevEl) upPrevEl.innerHTML = ''; uploadedFile = null;
+//     const fInEl = document.getElementById('chat-file-upload'); if (fInEl) fInEl.value = '';
+//     // TODO: Clear any pasted image preview from chat input area
+//     // Example:
+//     // const pastedImagePreview = document.getElementById('pasted-image-preview-in-chat');
+//     // if (pastedImagePreview) pastedImagePreview.src = ''; // or remove the element
+// }
+
+// Modify other functions that make backend calls (e.g., confirmCrop, requestScreenshot related calls)
+// to also include selectedModel.provider and selectedModel.model_id if the backend
+// routes for those actions are updated to accept and use them.
+
+// Example for confirmCrop (if /crop_image will use selected model for re-analysis)
+function confirmCrop() {
+    if (!currentImage) { alert('错误：没有当前图片。'); return; }
+    const overlayImageEl = document.getElementById('overlay-image');
+    if (!overlayImageEl || !overlayImageEl.naturalWidth) { alert('错误：图片未加载。'); return; }
+    const scaleX = overlayImageEl.naturalWidth / overlayImageEl.width;
+    const scaleY = overlayImageEl.naturalHeight / overlayImageEl.height;
+    const oSel = { 
+        x: Math.round(selection.x * scaleX), y: Math.round(selection.y * scaleY), 
+        width: Math.round(selection.width * scaleX), height: Math.round(selection.height * scaleY) 
+    };
+
+    const fd = new FormData();
+    fd.append('image_url', currentImage); // original image URL
+    fd.append('x', oSel.x); fd.append('y', oSel.y);
+    fd.append('width', oSel.width); fd.append('height', oSel.height);
+    
+    const prmptEl = document.getElementById('prompt-input');
+    if (prmptEl?.value.trim()) fd.append('prompt', prmptEl.value.trim());
+
+    // Add selected model information
+    if (selectedModel.provider && selectedModel.model_id) {
+        fd.append('provider', selectedModel.provider);
+        fd.append('model_id', selectedModel.model_id);
+    } else {
+        console.warn("Confirm Crop: No model selected, backend will use default for analysis.");
+    }
+
+    const analysisEl = document.getElementById('ss-ai-analysis');
+    if (analysisEl) analysisEl.innerHTML = `<i class="fas fa-spinner fa-spin"></i> 分析裁剪区域 (模型: ${selectedModel.provider || '默认'}/${selectedModel.model_id || '默认'})...`;
+    hideImageOverlay(); // Assuming defined
+
+    fetch('/crop_image', { method: 'POST', headers: { ...(TOKEN && {'Authorization': `Bearer ${TOKEN}`}) }, body: fd })
+    .then(r => {
+        if (!r.ok) return r.json().catch(() => ({error: `HTTP ${r.status}`})).then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
+        return r.json();
+    })
+    .then(d => {
+        debugLog(`Crop and re-analysis request acknowledged: ${JSON.stringify(d)}`);
+        // Analysis result will come via SocketIO event 'analysis_result' or 'new_screenshot'
+    })
+    .catch(e => {
+        console.error('Crop image error:', e);
+        alert(`裁剪或分析出错: ${e.message}`);
+        if (analysisEl) analysisEl.textContent = `分析失败: ${e.message}`;
+    });
+}
+
+
+// Modify Socket.IO event handlers to display provider/model if received
+// In processAIMessage(messageElement, messageText, sourceEvent)
+// When creating/updating the AI message div, you can use data from messageElement.dataset
+// (This assumes backend sends provider and model_id in socket events like 'chat_stream_chunk', 'chat_stream_end', 'analysis_result')
+
+/* Example modification within processAIMessage (you'll need to adapt to your exact structure)
+function processAIMessage(messageElement, messageText, sourceEvent = "unknown") {
+    // ... your existing strongTag and contentDiv creation ...
+    let strongTag = messageElement.querySelector('strong');
+    // ...
+    const providerName = messageElement.dataset.provider || 'AI'; // Get from data attribute
+    const modelName = messageElement.dataset.modelId || '';    // Get from data attribute
+    
+    strongTag.textContent = `${providerName}${modelName ? ` (${modelName.split('/').pop()})` : ''}: `; // Display like "OpenAI (gpt-4o): "
+    // ... rest of your markdown and KaTeX rendering ...
+}
+*/
+
+// Make sure initAllFeatures is the last thing called or is wrapped in DOMContentLoaded
+document.addEventListener('DOMContentLoaded', initAllFeatures);
 
 
 function formatFileSize(bytes) {
@@ -970,191 +1413,256 @@ socket.on('analysis_error', function(data) {
 // --- Chat Message Sending ---
 // --- Chat Message Sending ---
 // --- Chat Message Sending ---
+// server/static/main.js
+
+// (确保这些全局变量在文件顶部已定义)
+// let socket = null; // Your existing socket instance
+// let uploadedFile = null; // Your existing uploadedFile variable
+// let currentChatSessionId = null; // Your existing currentChatSessionId variable
+// let chatSessions = []; // Your existing chatSessions array
+// let TOKEN = ''; // Your existing TOKEN variable
+// let selectedModel = { provider: null, model_id: null }; // Defined in previous step
+
+// (其他辅助函数如 debugLog, escapeHtml, formatFileSize, generateUUID, scrollToChatBottom, removeThinkingIndicator, 
+// addChatHistoryItem, saveCurrentChatSessionId, saveChatSessionsToStorage 假设已存在且功能正确)
+
 function sendChatMessage() {
     const chatInputEl = document.getElementById('chat-chat-input');
-    const chatHistoryEl = document.getElementById('chat-chat-history'); // 定义在这里，后面也能访问
+    const chatHistoryEl = document.getElementById('chat-chat-history');
 
     if (!socket || !socket.connected) {
         console.error('[Chat] Socket not connected, cannot send message');
-        // 可以在这里给用户一个提示，比如一个短暂的弹出消息或状态栏更新
+        if(chatHistoryEl) { // 用户反馈
+            const errDiv = document.createElement('div');
+            errDiv.className = 'system-message error-text'; // 假设有 .error-text 样式
+            errDiv.textContent = '错误：无法连接到服务器，请检查网络连接。';
+            chatHistoryEl.appendChild(errDiv);
+            scrollToChatBottom(chatHistoryEl);
+        }
         return;
     }
 
-    if (!chatInputEl || !chatHistoryEl) { console.error("Chat input or history missing."); return; }
-    const message = chatInputEl.value.trim();
-    const currentFileToSend = uploadedFile; // 获取暂存的文件
-    if (!message && !currentFileToSend) { debugLog("Empty message and no file selected."); return; }
+    if (!chatInputEl || !chatHistoryEl) {
+        console.error("Chat input or history element missing.");
+        return;
+    }
 
-    // 查找或创建当前会话
+    const message = chatInputEl.value.trim();
+    const currentFileToSend = uploadedFile; // 从全局变量获取
+    let imageBase64Data = null; // 用于直接粘贴在聊天框的图片 (base64)
+
+    // --- 预留：处理直接粘贴在聊天框的图片 ---
+    // 例如，如果你有一个预览元素 for pasted images:
+    // const pastedImagePreview = document.getElementById('pasted-image-in-chat-preview');
+    // if (pastedImagePreview && pastedImagePreview.dataset.imageBase64) {
+    //     imageBase64Data = pastedImagePreview.dataset.imageBase64;
+    //     // 清理预览，因为消息即将发送
+    //     pastedImagePreview.style.display = 'none';
+    //     pastedImagePreview.removeAttribute('data-image-base64');
+    // }
+    // --- 预留结束 ---
+
+    if (!message && !currentFileToSend && !imageBase64Data) {
+        debugLog("Empty message, no file selected, and no directly provided image.");
+        return;
+    }
+
+    // --- 关键：检查是否有模型被选中 ---
+    if (!selectedModel.provider || !selectedModel.model_id) {
+        console.warn("No model selected. Please choose a model from the dropdown.");
+        if(chatHistoryEl) { // 用户反馈
+            const errDiv = document.createElement('div');
+            errDiv.className = 'system-message error-text';
+            errDiv.textContent = '请先从顶部选择一个AI模型。';
+            chatHistoryEl.appendChild(errDiv);
+            scrollToChatBottom(chatHistoryEl);
+        }
+        return;
+    }
+
+    // --- 会话管理 (与您提供的版本基本一致) ---
     let activeSession = currentChatSessionId ? chatSessions.find(s => s.id === currentChatSessionId) : null;
     if (!activeSession) {
         const newId = Date.now();
-        let title = message.substring(0, 30) || (currentFileToSend ? `含${currentFileToSend.name.substring(0, 20)}的对话` : '新对话');
-        if ((message.length > 30 && title.length === 30) || (currentFileToSend && currentFileToSend.name.length > 20 && title.length >= 22)) title += "...";
+        let title = message.substring(0, 30) ||
+                    (imageBase64Data ? "包含图片的对话" : null) || // 优先显示图片对话
+                    (currentFileToSend ? `含${currentFileToSend.name.substring(0, 20)}的对话` : '新对话');
+        if (title.length === 30 || (currentFileToSend && currentFileToSend.name.length > 20 && title.length >= 22 && title.endsWith("..."))) {
+            // title 已经很长或已截断
+        } else if (title.length > 30 || (currentFileToSend && currentFileToSend.name.length > 20)) {
+            title = title.substring(0, Math.min(title.length, 27)) + "...";
+        }
+
         activeSession = { id: newId, title: escapeHtml(title), history: [] };
-        chatSessions.unshift(activeSession); // 添加到会话列表顶部
-        addChatHistoryItem(activeSession); // 更新左侧会话列表UI
-        currentChatSessionId = newId; // 设置为当前活动会话
-        saveCurrentChatSessionId(); // 保存当前会话ID到localStorage
-        // 激活新会话的显示
+        chatSessions.unshift(activeSession);
+        addChatHistoryItem(activeSession); // (确保此函数已定义)
+        currentChatSessionId = newId;
+        saveCurrentChatSessionId(); // (确保此函数已定义)
         setTimeout(() => {
             const l = document.getElementById('chat-session-list');
             l?.querySelectorAll('.active-session').forEach(i => i.classList.remove('active-session'));
             l?.querySelector(`[data-session-id="${activeSession.id}"]`)?.classList.add('active-session');
-            if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = ''; // 清除初始提示
+            if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
         }, 0);
     }
 
-    // 将用户消息添加到内存中的历史记录
-    const histMsgTxt = message || (currentFileToSend ? `[用户上传了文件: ${currentFileToSend.name}]` : "");
-    // 确保 activeSession 存在 (理论上在上面已确保)
-    if (activeSession && (histMsgTxt || currentFileToSend)) {
-         activeSession.history.push({ role: 'user', parts: [{ text: histMsgTxt }] });
+    // --- 将用户消息添加到内存和UI ---
+    // 为历史记录准备文本 (主要用于纯文本历史或文件上传的标记)
+    let historyMessageText = message;
+    if (!historyMessageText && imageBase64Data && !currentFileToSend) {
+        historyMessageText = "[用户发送了一张图片]"; // 如果只有粘贴的图片
+    } else if (!historyMessageText && currentFileToSend) {
+        historyMessageText = `[用户上传了文件: ${currentFileToSend.name}]`;
+    } else if (historyMessageText && (currentFileToSend || imageBase64Data)) {
+        // 如果同时有文本和文件/图片，文本优先，后续可以在后端组合
+    }
+
+    if (activeSession && (historyMessageText || currentFileToSend || imageBase64Data)) {
+        activeSession.history.push({ role: 'user', parts: [{ text: historyMessageText }] });
+        // 注意：如果 imageBase64Data 存在，更完善的历史记录可能需要包含图像信息，
+        // 但这取决于后端如何处理历史中的多模态内容。目前简单起见，只存文本标记。
     } else if (!activeSession) {
-         console.error("[sendChatMessage] Critical error: activeSession is null when trying to push user message.");
-         return; // 避免后续错误
+        console.error("[sendChatMessage] Critical error: activeSession is null when trying to push user message.");
+        return;
     }
 
     // 更新UI显示用户消息
     const uDiv = document.createElement('div'); uDiv.className = 'user-message';
     const uStrong = document.createElement('strong'); uStrong.textContent = "您: "; uDiv.appendChild(uStrong);
     const uMsgContentDiv = document.createElement('div'); uMsgContentDiv.className = 'message-content';
-    uMsgContentDiv.textContent = message;
+    // uMsgContentDiv.textContent = message; // 只显示文本提示
+
+    // 改进UI显示，能同时处理文本、粘贴的图片预览（如果实现）、上传的文件信息
+    let contentAddedToMsgDiv = false;
+    if (message) {
+        const textNode = document.createTextNode(message);
+        uMsgContentDiv.appendChild(textNode);
+        contentAddedToMsgDiv = true;
+    }
+    // 如果实现了粘贴图片预览，可以在这里添加预览到 uMsgContentDiv
+    if (imageBase64Data && !currentFileToSend) { // 假设粘贴的图片优先于文件上传显示在用户消息气泡中
+        if (contentAddedToMsgDiv) uMsgContentDiv.appendChild(document.createElement('br'));
+        const imgInfo = document.createElement('div');
+        imgInfo.className = 'attached-file'; // 复用样式
+        imgInfo.innerHTML = `<i class="fas fa-image"></i> [已粘贴图片进行分析]`;
+        uMsgContentDiv.appendChild(imgInfo);
+        contentAddedToMsgDiv = true;
+    }
     if (currentFileToSend) {
+        if (contentAddedToMsgDiv) uMsgContentDiv.appendChild(document.createElement('br'));
         const fD = document.createElement('div'); fD.className = 'attached-file';
         fD.innerHTML = `<i class="fas fa-paperclip"></i> ${escapeHtml(currentFileToSend.name)} (${formatFileSize(currentFileToSend.size)})`;
-        if (message) uMsgContentDiv.appendChild(document.createElement('br'));
         uMsgContentDiv.appendChild(fD);
     }
     uDiv.appendChild(uMsgContentDiv);
-    if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = ''; // 如果是第一条消息，清除提示
-    chatHistoryEl.appendChild(uDiv); // 添加用户消息到聊天窗口
+    if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+    chatHistoryEl.appendChild(uDiv);
 
-    const reqId = generateUUID(); // 为本次请求生成唯一ID
-    console.log(`[sendChatMessage] Generated reqId: ${reqId}`);
+    // --- 生成请求ID并显示“思考中” ---
+    const reqId = generateUUID();
+    console.log(`[sendChatMessage] Generated reqId: ${reqId} for model ${selectedModel.provider}/${selectedModel.model_id}`);
 
-    // 显示“思考中”指示器
     const thinkingDiv = document.createElement('div');
     thinkingDiv.className = 'ai-message ai-thinking';
-    thinkingDiv.dataset.requestId = reqId; // 绑定请求ID，方便后续移除
-    thinkingDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> AI正在思考...';
+    thinkingDiv.dataset.requestId = reqId;
+    // 在“思考中”提示里加入选择的模型信息
+    thinkingDiv.innerHTML = `<i class="fas fa-spinner fa-spin"></i> AI (${selectedModel.provider || '默认'}/${selectedModel.model_id || '默认'}) 正在思考...`;
     chatHistoryEl.appendChild(thinkingDiv);
-    scrollToChatBottom(chatHistoryEl); // 滚动到底部
+    scrollToChatBottom(chatHistoryEl);
 
-    // 向内存中的历史记录添加AI回复的占位符 (文本为空，但有temp_id)
-    if (activeSession) { // 再次确认 activeSession 存在
-        activeSession.history.push({ role: 'model', parts: [{ text: '' }], temp_id: reqId, provider: 'AI' });
+    // --- AI回复占位符 (在历史记录中包含模型信息) ---
+    if (activeSession) {
+        activeSession.history.push({
+            role: 'model',
+            parts: [{ text: '' }],
+            temp_id: reqId,
+            provider: selectedModel.provider, // 保存实际使用的模型信息
+            model_id: selectedModel.model_id
+        });
     } else {
-         console.error("[sendChatMessage] Critical error: activeSession is null when trying to push model placeholder.");
-         // 可能需要移除 thinkingDiv 并提示错误
-         if(thinkingDiv.parentNode === chatHistoryEl) chatHistoryEl.removeChild(thinkingDiv);
-         return;
+        console.error("[sendChatMessage] Critical error: activeSession is null when trying to push model placeholder.");
+        if(thinkingDiv.parentNode === chatHistoryEl) removeThinkingIndicator(chatHistoryEl, thinkingDiv); // (确保此函数已定义)
+        return;
     }
 
     const streamToggle = document.getElementById('streaming-toggle-checkbox');
-    const stream = streamToggle ? streamToggle.checked : true; // 获取流式输出设置
+    const stream = streamToggle ? streamToggle.checked : true;
+    let histToSend = activeSession ? JSON.parse(JSON.stringify(activeSession.history.slice(0, -1))) : []; // 不包含AI占位符
 
-    // 准备发送给后端的历史记录 (不包含最后一条 AI 占位符)
-    let histToSend = activeSession ? JSON.parse(JSON.stringify(activeSession.history.slice(0, -1))) : [];
-
-    // 根据是否有文件决定请求方式
+    // --- 根据是否有文件（currentFileToSend）决定请求方式 ---
     if (currentFileToSend) {
-        // --- 带文件上传：使用 fetch 请求 /chat_with_file ---
+        // 如果是文件上传，imageBase64Data (来自粘贴) 通常应被忽略，或由后端逻辑决定优先级。
+        // 目前：文件上传优先，imageBase64Data 不会通过 FormData 发送。
+        // 如果希望文件上传也结合粘贴的图片（虽然不常见），后端 /chat_with_file 需要额外处理。
+        console.log(`[sendChatMessage] Using /chat_with_file for file: ${currentFileToSend.name}`);
         const fd = new FormData();
-        fd.append('prompt', message);
+        fd.append('prompt', message); // 用户输入的文本提示
         fd.append('file', currentFileToSend, currentFileToSend.name);
         fd.append('history', JSON.stringify(histToSend));
-        fd.append('use_streaming', stream); // 后端会根据这个决定行为吗？(当前后端实现似乎没用这个)
+        // fd.append('use_streaming', stream); // 后端 /chat_with_file 可能不直接支持流式响应，但可以影响后续SocketIO行为
         fd.append('session_id', activeSession.id);
-        fd.append('request_id', reqId); // 发送前端生成的 reqId
+        fd.append('request_id', reqId);
+        fd.append('provider', selectedModel.provider);   // <--- 传递选择的提供商
+        fd.append('model_id', selectedModel.model_id);     // <--- 传递选择的模型ID
 
-        console.log('DEBUG: Fetching /chat_with_file with Authorization Header:', `Bearer ${TOKEN}`); 
-
-        fetch('/chat_with_file', { method: 'POST', headers: { 'Authorization': `Bearer ${TOKEN}` }, body: fd })
-            .then(r => { // 处理 HTTP 响应头
-                if (!r.ok) { // 如果 HTTP 状态码不是 2xx
-                    // 尝试解析 JSON 错误体，若失败则用状态文本构造错误
+        fetch('/chat_with_file', { method: 'POST', headers: { ...(TOKEN && {'Authorization': `Bearer ${TOKEN}`}) }, body: fd })
+            .then(r => {
+                if (!r.ok) {
                     return r.json().catch(() => ({ error: `HTTP Error: ${r.status} ${r.statusText}` }))
                                .then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
                 }
-                return r.json(); // 解析成功的 JSON 响应体
+                return r.json();
             })
-            .then(d => { // 处理来自 /chat_with_file 的确认响应 {status, message, request_id}
-                // 检查响应内容是否符合预期，且 request_id 是否与我们发送的一致
+            .then(d => {
                 if (d && d.request_id === reqId && d.status === 'processing') {
-                    // 服务器已接受请求，后台任务已开始
-                    console.log(`[File Upload] Request ${reqId} accepted by server. Status: ${d.status}. Waiting for Socket.IO response.`);
-                    // “思考中”指示器保持显示，等待后续 Socket.IO 事件 (如 chat_stream_end 或 analysis_result)
-                    // 不需要在这里更新UI或保存历史，依赖 Socket.IO 处理器完成
+                    console.log(`[/chat_with_file] Request ${reqId} accepted by server. Waiting for Socket.IO. Model: ${selectedModel.provider}/${selectedModel.model_id}`);
                 } else {
-                    // 服务器确认响应无效或 request_id 不匹配
-                    console.warn('[File Upload] Server acknowledgment error or request_id mismatch.', d);
+                    console.warn('[/chat_with_file] Server acknowledgment error or request_id mismatch.', d);
                     const currentThinkingDivMismatch = chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
                     if (currentThinkingDivMismatch) removeThinkingIndicator(chatHistoryEl, currentThinkingDivMismatch);
-                    // 显示错误给用户
                     const errD = document.createElement('div');
                     errD.className = 'ai-message error-message';
                     errD.innerHTML = `<strong>系统错误:</strong><span>服务器未能确认处理文件请求。</span>`;
-                    if (chatHistoryEl) {
-                        chatHistoryEl.appendChild(errD);
-                        scrollToChatBottom(chatHistoryEl);
-                    }
-                    // 清理历史记录中的AI占位符
-                    if (activeSession) {
-                        const messageIndex = activeSession.history.findIndex(msg => msg.role === 'model' && msg.temp_id === reqId);
-                        if (messageIndex !== -1) {
-                            activeSession.history.splice(messageIndex, 1);
-                            saveChatSessionsToStorage(); // 保存清理后的历史
-                            console.log(`[History] Removed placeholder AI message for unacknowledged request ${reqId}`);
-                        }
-                    }
+                    if (chatHistoryEl) { chatHistoryEl.appendChild(errD); scrollToChatBottom(chatHistoryEl); }
+                    if (activeSession) { /* ... 清理历史占位符 ... */ }
                 }
             })
-            .catch(e => { // fetch 调用本身失败 (网络错误, 404, 500 等)
-                console.error('Chat w/ file fetch error:', e);
+            .catch(e => {
+                console.error('[/chat_with_file] Fetch error:', e);
                 const currentThinkingDivError = chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
                 if (currentThinkingDivError) removeThinkingIndicator(chatHistoryEl, currentThinkingDivError);
-
                 const errD = document.createElement('div');
                 errD.className = 'ai-message error-message';
                 errD.innerHTML = `<strong>系统错误:</strong><span>文件上传请求失败: ${escapeHtml(e.message)}</span>`;
-                if (chatHistoryEl) {
-                    chatHistoryEl.appendChild(errD);
-                    scrollToChatBottom(chatHistoryEl);
-                }
-                // 清理历史记录中的AI占位符
-                if (activeSession) {
-                    const messageIndex = activeSession.history.findIndex(msg => msg.role === 'model' && msg.temp_id === reqId);
-                    if (messageIndex !== -1) {
-                        activeSession.history.splice(messageIndex, 1);
-                        saveChatSessionsToStorage(); // 保存清理后的历史
-                        console.log(`[History] Removed placeholder AI message for failed fetch request ${reqId}`);
-                    }
-                }
+                if (chatHistoryEl) { chatHistoryEl.appendChild(errD); scrollToChatBottom(chatHistoryEl); }
+                if (activeSession) { /* ... 清理历史占位符 ... */ }
             });
     } else {
-        // --- 不带文件：使用 Socket.IO 发送 chat_message 事件 ---
+        // --- 无文件上传：使用 Socket.IO 发送 chat_message，可能包含文本和/或粘贴的图片 ---
+        console.log(`[sendChatMessage] Emitting 'chat_message' via Socket.IO. Image via base64: ${imageBase64Data ? 'Yes' : 'No'}`);
         socket.emit('chat_message', {
             prompt: message,
             history: histToSend,
             request_id: reqId,
-            use_streaming: stream, // 告知服务器是否期望流式响应
-            session_id: activeSession.id
+            use_streaming: stream,
+            session_id: activeSession.id,
+            provider: selectedModel.provider,      // <--- 传递选择的提供商
+            model_id: selectedModel.model_id,        // <--- 传递选择的模型ID
+            image_data: imageBase64Data        // <--- 传递粘贴图片的base64数据 (可能为null)
         });
-        // AI 的响应将通过 chat_stream_chunk 和 chat_stream_end 事件到达
-        // 务必确保 chat_stream_end 处理器会更新并保存历史记录
     }
 
-    // 不论请求方式如何，都在添加用户消息和AI占位符后立即保存一次
-    // 这确保了即使浏览器意外关闭，用户输入和AI思考状态也能恢复
     if (activeSession) {
-        saveChatSessionsToStorage();
+        saveChatSessionsToStorage(); // (确保此函数已定义)
     }
 
-    // 清空输入框和文件预览区
+    // 清空输入
     chatInputEl.value = '';
     const upPrevEl = document.getElementById('chat-upload-preview'); if (upPrevEl) upPrevEl.innerHTML = ''; uploadedFile = null;
     const fInEl = document.getElementById('chat-file-upload'); if (fInEl) fInEl.value = '';
+    // TODO: 如果实现了粘贴图片预览，在这里也需要清空它
+    // const pastedImagePreview = document.getElementById('pasted-image-in-chat-preview');
+    // if (pastedImagePreview) { pastedImagePreview.style.display = 'none'; pastedImagePreview.removeAttribute('data-image-base64'); }
 }
 // --- Image Overlay & Cropping ---
 function hideImageOverlay(){
@@ -1170,20 +1678,20 @@ function showImageOverlay(imageUrl) {
 function updateSelectionBox(){
     const sB=document.getElementById('selection-box'),cI=document.getElementById('crop-info'),iE=document.getElementById('overlay-image');if(!sB||!cI||!iE||!iE.width||!iE.naturalWidth)return;selection.x=Math.max(0,Math.min(selection.x,iE.width));selection.y=Math.max(0,Math.min(selection.y,iE.height));selection.width=Math.max(10,Math.min(selection.width,iE.width-selection.x));selection.height=Math.max(10,Math.min(selection.height,iE.height-selection.y));sB.style.left=`${selection.x}px`;sB.style.top=`${selection.y}px`;sB.style.width=`${selection.width}px`;sB.style.height=`${selection.height}px`;const sX_=iE.naturalWidth/iE.width,sY_=iE.naturalHeight/iE.height;cI.textContent=`选择(原图):${Math.round(selection.x*sX_)},${Math.round(selection.y*sY_)}, ${Math.round(selection.width*sX_)}x${Math.round(selection.height*sY_)}`;
 }
-function confirmCrop() {
-    if (!currentImage) { alert('错误：没有当前图片。'); return; } const overlayImageEl = document.getElementById('overlay-image');
-    if (!overlayImageEl || !overlayImageEl.naturalWidth) { alert('错误：图片未加载。'); return; }
-    const scaleX = overlayImageEl.naturalWidth / overlayImageEl.width; const scaleY = overlayImageEl.naturalHeight / overlayImageEl.height;
-    const oSel = { x: Math.round(selection.x*scaleX), y: Math.round(selection.y*scaleY), width: Math.round(selection.width*scaleX), height: Math.round(selection.height*scaleY) };
-    const fd = new FormData(); fd.append('image_url', currentImage); fd.append('x', oSel.x); fd.append('y', oSel.y); fd.append('width', oSel.width); fd.append('height', oSel.height);
-    const prmptEl = document.getElementById('prompt-input'); if (prmptEl?.value.trim()) fd.append('prompt', prmptEl.value.trim());
-    const analysisEl = document.getElementById('ss-ai-analysis'); if (analysisEl) analysisEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 分析中...';
-    hideImageOverlay();
-    fetch('/crop_image', { method: 'POST', headers:{'Authorization':`Bearer ${TOKEN}`}, body:fd })
-    .then(r=>{if(!r.ok)return r.json().catch(()=>({error:`HTTP ${r.status}`})).then(eD=>{throw new Error(eD.message||eD.error||`HTTP ${r.status}`)});return r.json()})
-    .then(d=>debugLog(`Crop ack: ${JSON.stringify(d)}`))
-    .catch(e=>{console.error('Crop error:',e);alert(`裁剪出错: ${e.message}`);if(analysisEl)analysisEl.textContent=`分析失败: ${e.message}`;});
-}
+// function confirmCrop() {
+//     if (!currentImage) { alert('错误：没有当前图片。'); return; } const overlayImageEl = document.getElementById('overlay-image');
+//     if (!overlayImageEl || !overlayImageEl.naturalWidth) { alert('错误：图片未加载。'); return; }
+//     const scaleX = overlayImageEl.naturalWidth / overlayImageEl.width; const scaleY = overlayImageEl.naturalHeight / overlayImageEl.height;
+//     const oSel = { x: Math.round(selection.x*scaleX), y: Math.round(selection.y*scaleY), width: Math.round(selection.width*scaleX), height: Math.round(selection.height*scaleY) };
+//     const fd = new FormData(); fd.append('image_url', currentImage); fd.append('x', oSel.x); fd.append('y', oSel.y); fd.append('width', oSel.width); fd.append('height', oSel.height);
+//     const prmptEl = document.getElementById('prompt-input'); if (prmptEl?.value.trim()) fd.append('prompt', prmptEl.value.trim());
+//     const analysisEl = document.getElementById('ss-ai-analysis'); if (analysisEl) analysisEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 分析中...';
+//     hideImageOverlay();
+//     fetch('/crop_image', { method: 'POST', headers:{'Authorization':`Bearer ${TOKEN}`}, body:fd })
+//     .then(r=>{if(!r.ok)return r.json().catch(()=>({error:`HTTP ${r.status}`})).then(eD=>{throw new Error(eD.message||eD.error||`HTTP ${r.status}`)});return r.json()})
+//     .then(d=>debugLog(`Crop ack: ${JSON.stringify(d)}`))
+//     .catch(e=>{console.error('Crop error:',e);alert(`裁剪出错: ${e.message}`);if(analysisEl)analysisEl.textContent=`分析失败: ${e.message}`;});
+// }
 function initSelectionControls(){/* ... (selection controls logic as provided in original user file, ensure it's complete) ... */
     const sb=document.getElementById('selection-box'),oi=document.getElementById('overlay-image');if(!sb||!oi)return;let sx_s,sy_s,isx_s,isy_s,isr_s;function hs(e){e.preventDefault();isDragging=true;const tE=e.type.startsWith('touch'),cX=tE?e.touches[0].clientX:e.clientX,cY=tE?e.touches[0].clientY:e.clientY,iR=oi.getBoundingClientRect();sx_s=cX-iR.left;sy_s=cY-iR.top;isx_s=cX;isy_s=cY;isr_s={...selection};const br=sb.getBoundingClientRect(),rx=cX-br.left,ry=cY-br.top,et=15;dragType=rx>=isr_s.width-et&&ry>=isr_s.height-et?'resize-se':sx_s>=isr_s.x&&sx_s<=isr_s.x+isr_s.width&&sy_s>=isr_s.y&&sy_s<=isr_s.y+isr_s.height?'move':(dragType='draw',selection={x:sx_s,y:sy_s,width:0,height:0},updateSelectionBox(),undefined);if(!isDragging&&dragType!='draw')return;if(tE){document.addEventListener('touchmove',hm,{passive:false});document.addEventListener('touchend',he);document.addEventListener('touchcancel',he);}else{document.addEventListener('mousemove',hm);document.addEventListener('mouseup',he);}}function hm(e){if(!isDragging)return;e.preventDefault();const tE=e.type.startsWith('touch'),cX=tE?e.touches[0].clientX:e.clientX,cY=tE?e.touches[0].clientY:e.clientY,iR=oi.getBoundingClientRect(),currXimg=cX-iR.left,currYimg=cY-iR.top,dcx=cX-isx_s,dcy=cY-isy_s;if(dragType==='move'){selection.x=isr_s.x+dcx;selection.y=isr_s.y+dcy;}else if(dragType==='resize-se'){selection.width=isr_s.width+dcx;selection.height=isr_s.height+dcy;}else if(dragType==='draw'){selection.width=currXimg-selection.x;selection.height=currYimg-selection.y;if(selection.width<0){selection.x=currXimg;selection.width=-selection.width;}if(selection.height<0){selection.y=currYimg;selection.height=-selection.height;}}updateSelectionBox();}function he(){if(!isDragging)return;isDragging=false;dragType='';document.removeEventListener('mousemove',hm);document.removeEventListener('mouseup',he);document.removeEventListener('touchmove',hm,{passive:false});document.removeEventListener('touchend',he);document.removeEventListener('touchcancel',he);}oi.replaceWith(oi.cloneNode(true));document.getElementById('overlay-image').addEventListener('mousedown',hs);document.getElementById('overlay-image').addEventListener('touchstart',hs,{passive:false});sb.replaceWith(sb.cloneNode(true));document.getElementById('selection-box').addEventListener('mousedown',hs);document.getElementById('selection-box').addEventListener('touchstart',hs,{passive:false});const nsb=document.getElementById('selection-box');if('ontouchstart'in window&&!nsb.querySelector('.resize-handle-se')){const rh=document.createElement('div');rh.className='resize-handle resize-handle-se';nsb.appendChild(rh);}}
 
@@ -1979,60 +2487,80 @@ function saveCurrentChatSessionId() {
 // --- Main Initialization ---
 
 
+// server/static/main.js
+
+// ... (确保文件顶部有这些全局变量的定义)
+// let TOKEN = ''; // Your existing TOKEN variable
+// let availableModels = {};
+// let selectedModel = { provider: null, model_id: null };
+// const MODEL_SELECTOR_STORAGE_KEY_PROVIDER = 'selectedProvider';
+// const MODEL_SELECTOR_STORAGE_KEY_MODEL_ID = 'selectedModelId';
+
+// ... (确保 fetchAndPopulateModels 和 handleModelSelectionChange 函数已按上一步骤添加) ...
+
 function initAllFeatures() {
     console.log("--- Initializing All Features ---");
     const tokenMeta = document.querySelector('meta[name="token"]');
     if (tokenMeta?.content) {
-        TOKEN = tokenMeta.content; // 赋值给全局或模块级 TOKEN 变量
-        console.log("Token loaded from meta tag.");
+        TOKEN = tokenMeta.content;
+        console.log("Token loaded from meta tag:", TOKEN ? "Present" : "Empty/Not Present");
     } else {
         console.warn('Token meta tag missing or empty. Some features might not work.');
-        // 如果 TOKEN 对后续初始化至关重要，您可能需要在这里提前返回或采取其他措施
     }
 
-    initMarkdownRenderer();
-    initSidebarToggle();
+    // 初始化核心渲染和UI组件
+    if (typeof initMarkdownRenderer === 'function') initMarkdownRenderer(); else console.warn("initMarkdownRenderer is not defined");
+    if (typeof initSidebarToggle === 'function') initSidebarToggle(); else console.warn("initSidebarToggle is not defined");
+    if (typeof initThemeSelector === 'function') initThemeSelector(); else console.warn("initThemeSelector is not defined");
+
+    // *** 新增：获取并填充模型选择器 ***
+    // 这个调用会异步获取模型列表并更新UI
+    if (typeof fetchAndPopulateModels === 'function') {
+        fetchAndPopulateModels(); 
+    } else {
+        console.error("CRITICAL: fetchAndPopulateModels function is not defined! Model selector will not work.");
+        // 可以在UI上显示更明显的错误，例如在 #model-selector 处
+        const modelSelectorEl = document.getElementById('model-selector');
+        if (modelSelectorEl) modelSelectorEl.innerHTML = '<option value="">错误: 模型加载功能缺失</option>';
+        const apiProviderDisplayEl = document.getElementById('api-provider-display');
+        if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: 功能错误';
+
+    }
     
-    initThemeSelector(); // <<< 新增：调用主题初始化函数
-
-    // 关于 API 信息和模型列表的获取:
-    // 如果您已经将模型列表获取逻辑整合到了 fetchInitialModelsInfo() 中，
-    // 并且该函数会在 SocketIO 连接成功后被调用 (通过 initSocketIO -> socket.on('connect')),
-    // 那么您可能不需要在这里再次调用 getApiInfo() 或 fetchInitialModelsInfo()。
-    // 如果 getApiInfo() 只是获取 provider 名称，并且您仍需要它，可以保留。
-    // 关键是确保模型选择器和主题选择器都能在合适的时机被正确初始化和填充。
-    // 我将假设 fetchInitialModelsInfo (或类似的函数) 会在 socket 连接后处理模型列表的加载。
-    // getApiInfo(); // 如果这个函数只是获取旧的 provider 信息，可以考虑与模型列表获取合并或调整。
-
-    // KaTeX 渲染页面上已有的内容
-    // 确保 renderLatexInElement 函数已正确导入或定义
+    // KaTeX 渲染 (如果页面初始加载时就有需要渲染的内容)
     if (typeof renderLatexInElement === 'function') {
-        document.querySelectorAll('.message-content').forEach(element => {
-            try {
-                renderLatexInElement(element);
-            } catch (e) {
-                console.error("Error rendering KaTeX for existing element:", e, element);
-            }
-        });
+        // 延迟一点执行，确保DOM结构稳定，特别是如果其他初始化函数会修改DOM
+        setTimeout(() => {
+            document.querySelectorAll('.message-content').forEach(element => {
+                try {
+                    renderLatexInElement(element);
+                } catch (e) {
+                    console.error("Error rendering KaTeX for existing element:", e, element);
+                }
+            });
+        }, 100); // 短暂延迟
     } else {
         console.warn("renderLatexInElement function is not available. KaTeX rendering for existing content skipped.");
     }
 
-    initBaseButtonHandlers();
-    initTabs();
-    initScreenshotAnalysisHandlers();
-    initAiChatHandlers();
-    initVoiceAnswerHandlers();
+    // 初始化其他UI处理器和功能模块
+    if (typeof initBaseButtonHandlers === 'function') initBaseButtonHandlers(); else console.warn("initBaseButtonHandlers is not defined");
+    if (typeof initTabs === 'function') initTabs(); else console.warn("initTabs is not defined");
+    if (typeof initScreenshotAnalysisHandlers === 'function') initScreenshotAnalysisHandlers(); else console.warn("initScreenshotAnalysisHandlers is not defined");
+    if (typeof initAiChatHandlers === 'function') initAiChatHandlers(); else console.warn("initAiChatHandlers is not defined");
+    if (typeof initVoiceAnswerHandlers === 'function') initVoiceAnswerHandlers(); else console.warn("initVoiceAnswerHandlers is not defined");
     
-    initSocketIO(); // Socket.IO 的初始化通常会包含连接成功后获取初始数据的逻辑
+    // Socket.IO 初始化通常放在最后，因为它可能依赖于其他UI元素或状态的设置
+    if (typeof initSocketIO === 'function') initSocketIO(); else console.error("CRITICAL: initSocketIO is not defined! Real-time communication will not work.");
 
     console.log("--- Application initialization complete ---");
 }
 
-
+// 保持您现有的两个 DOMContentLoaded 监听器
+// 第一个用于调用 initAllFeatures
 document.addEventListener('DOMContentLoaded', initAllFeatures);
 
-// 按钮触摸效果的 DOMContentLoaded 监听器
+// 第二个用于按钮触摸效果 (保持不变)
 document.addEventListener('DOMContentLoaded', ()=>{
     const btns=document.querySelectorAll('button,.btn,.tab-item');
     btns.forEach(b=>{
@@ -2041,18 +2569,16 @@ document.addEventListener('DOMContentLoaded', ()=>{
             if(touchTimer){
                 clearTimeout(touchTimer);
                 touchTimer=null;
-                // 'this' 在箭头函数中可能指向外部作用域，取决于 clearTimer 如何被调用
-                // 如果是作为事件监听器回调，普通函数可能更合适以确保 'this' 指向按钮
-                // 但既然您用了 this.classList.remove，它在特定调用下应该能工作
-                b.classList.remove('touch-active'); // 直接用 b 更安全
+                b.classList.remove('touch-active');
             }
         };
-        b.addEventListener('touchstart',function(){ // 用普通函数确保 this 指向 b
+        b.addEventListener('touchstart',function(){
             this.classList.add('touch-active');
-            touchTimer=setTimeout(() => clearTimer(), 300); // 确保 clearTimer 能访问 b
+            touchTimer=setTimeout(clearTimer, 300); // 箭头函数会绑定外部的 clearTimer
         },{passive:true});
-        b.addEventListener('touchend', () => clearTimer()); // 确保 clearTimer 能访问 b
-        b.addEventListener('touchcancel', () => clearTimer()); // 确保 clearTimer 能访问 b
+        // 对于 touchend 和 touchcancel，使用箭头函数以确保 clearTimer 的上下文正确
+        b.addEventListener('touchend', () => clearTimer()); 
+        b.addEventListener('touchcancel', () => clearTimer());
     });
     if(!document.querySelector('style#touch-active-style')){
         const s=document.createElement('style');
@@ -2061,4 +2587,3 @@ document.addEventListener('DOMContentLoaded', ()=>{
         document.head.appendChild(s);
     }
 });
-

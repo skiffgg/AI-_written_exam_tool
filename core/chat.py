@@ -1,736 +1,567 @@
 # core/chat.py
 """
-提供 chat_only 函数，用于根据 settings.image_analysis_provider
-调用 OpenAI / Gemini 文本模型返回回复，并支持多轮对话历史。
+提供 chat_only 和 chat_only_stream 函数，用于根据选定的模型和提供商
+调用相应的 AI API（OpenAI, Gemini 等）返回回复，并支持多轮对话历史以及可选的图像输入。
 """
 from __future__ import annotations
 import logging
-import logging
-import json # <--- 添加缺失的导入
-from typing import Any, Dict, List, Optional, Callable # 确保 Callable 被导入
+import json
+import base64
+import io
+from typing import Any, Dict, List, Optional, Callable
+import os # 确保导入 os
 
-# --- 标准库和第三方库导入 ---
+import openai # Ensure openai is imported
 import google.generativeai as genai
-# import openai # 如果这个文件也处理 openai 调用
+from PIL import Image # For Gemini image processing
 
-# --- 本地模块导入 ---
-from core.settings import settings # 全局配置实例
-from core.constants import DEFAULT_MODEL_GEMINI # 默认 Gemini 模型名称
+from core.settings import settings
+from core.constants import (
+    ALL_AVAILABLE_MODELS,
+    ModelProvider,
+    get_default_model_for_provider,
+)
 from google.api_core import exceptions as google_api_exceptions
+
 
 log = logging.getLogger(__name__)
 
-# --- API Key 和代理的全局配置建议 ---
-# 再次强调，genai.configure() 和环境变量的设置（用于代理）
-# 最好在应用程序启动时（例如 main.py 或 app_setup.py）进行一次。
-# 假设这已在外部完成。
-from typing import Any, Dict, List, Optional # <-- Import List
-
-# --- 标准库和第三方库导入 ---
-import openai
-import google.generativeai as genai
-
-# --- 本地模块导入 ---
-from core.settings import settings
-from core.constants import DEFAULT_MODEL_GEMINI, DEFAULT_MODEL_OPENAI
-
-# --- 日志配置 ---
-# 使用 getLogger 获取命名的 logger，而不是直接用 basicConfig (通常在主入口或设置模块配置)
-# 如果您在 web_server.py 或 settings.py 中已经配置了 basicConfig，这里就不需要了
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-log = logging.getLogger(__name__) # 获取当前模块的 logger
-
-# === OpenAI Chat Function (with History) ===
-
-def _prepare_system_message() -> Dict[str, Any]:
-    """准备系统消息，告诉 AI 它的角色和能力"""
-    return {
-        "role": "system",
-        "content": """你是一个有用的AI助手。回答用户的问题时，请提供准确、有帮助的信息。
-        
+# --- System Prompt Preparation ---
+def _prepare_system_message(provider: str) -> Dict[str, Any] | None:
+    """
+    准备系统消息，告诉 AI 它的角色和能力。
+    """
+    content = """你是一个有用的AI助手。请提供准确、有帮助的信息。
+如果分析图像，请详细描述图像内容，并指出任何不寻常之处。
 如果需要展示数学公式，可以使用 LaTeX 语法：
 - 行内公式使用 $...$ 或 \\(...\\)
 - 行间公式使用 $$...$$  或 \\[...\\]
+例如：爱因斯坦质能方程: $E=mc^2$
+"""
+    if provider == ModelProvider.OPENAI:
+        return {"role": "system", "content": content}
+    elif provider == ModelProvider.GEMINI:
+        # Gemini 通常通过 system_instruction 参数或对话内容本身来传递系统级指令
+        return None 
+    return {"role": "system", "content": content}
 
-例如：
-- 爱因斯坦质能方程: $E=mc^2$
-- 欧拉公式: $e^{i\\pi} + 1 = 0$
-- 二次方程求根公式: $x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$
-
-当用户询问数学、物理或其他需要公式的问题时，请使用适当的 LaTeX 语法来呈现公式。"""
-    }
-
-def _chat_openai(prompt: str, history: Optional[List[Dict[str, Any]]] = None) -> str:
-    """
-    调用 OpenAI Chat 模型，并支持传入对话历史。
-
-    Args:
-        prompt: 当前用户的输入。
-        history: 对话历史列表，格式类似 [{'role': 'user'/'assistant', 'content': '...'}, ...]。
-                 注意：Gemini 的 'model' role 需要映射到 OpenAI 的 'assistant' role。
-
-    Returns:
-        模型生成的回复文本。
-
-    Raises:
-        openai.APIError: 如果 API 调用失败。
-    """
+# === OpenAI Chat Function (Multimodal) ===
+def _chat_openai(
+    prompt: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+    model_id: Optional[str] = None,
+    image_base64: Optional[str] = None
+) -> str:
     if not settings.openai_api_key:
         raise ValueError("OpenAI API key not configured.")
 
-    client = openai.OpenAI(api_key=settings.openai_api_key, http_client=settings.get_httpx_client()) # Pass proxy client
+    # 使用 settings.get_httpx_client() 获取配置了代理的 client
+    http_client_with_proxy = settings.get_httpx_client()
+    client = openai.OpenAI(api_key=settings.openai_api_key, http_client=http_client_with_proxy)
     
-    # --- 构建 OpenAI messages 列表 ---
-    messages = [_prepare_system_message()] # System prompt first
-    
-    # Add history, mapping roles
+    effective_model_id = model_id or get_default_model_for_provider(ModelProvider.OPENAI)
+    if not effective_model_id:
+        effective_model_id = "gpt-4o" 
+        log.warning(f"OpenAI model_id defaulted to '{effective_model_id}' due to no specific or default found.")
+
+    messages: List[Dict[str, Any]] = []
+    system_message = _prepare_system_message(ModelProvider.OPENAI)
+    if system_message:
+        messages.append(system_message)
+
     if history:
         for turn in history:
             role = turn.get("role")
-            # Gemini uses 'model', OpenAI uses 'assistant'
             openai_role = "assistant" if role == "model" else role
-            # Gemini uses 'parts':[{'text':...}], OpenAI uses 'content'
-            try:
-                content = turn.get("parts", [{}])[0].get("text", "")
-                if openai_role in ["user", "assistant"] and content: # Only add valid roles and non-empty content
-                    messages.append({"role": openai_role, "content": content})
-            except (IndexError, AttributeError, TypeError):
-                 log.warning(f"Skipping invalid history turn for OpenAI: {turn}")
+            text_content = None
+            if isinstance(turn.get("parts"), list) and turn["parts"]:
+                text_content = turn["parts"][0].get("text", "")
+            elif isinstance(turn.get("content"), str):
+                text_content = turn.get("content", "")
+            
+            current_turn_content_parts = []
+            if text_content:
+                current_turn_content_parts.append({"type": "text", "text": text_content})
+            # TODO: If history turns can contain images, process them here for OpenAI
 
+            if openai_role in ["user", "assistant"] and current_turn_content_parts:
+                messages.append({"role": openai_role, "content": current_turn_content_parts})
+            elif openai_role in ["user", "assistant"] and text_content: # Fallback for simple text
+                 messages.append({"role": openai_role, "content": text_content})
 
-    # Add current user prompt
-    if prompt: # Ensure prompt is not empty
-       messages.append({"role": "user", "content": prompt})
-    # ----------------------------------
+    current_user_content_parts: List[Dict[str, Any]] = []
+    if prompt:
+        current_user_content_parts.append({"type": "text", "text": prompt})
+    if image_base64:
+        image_url_content = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+        current_user_content_parts.append(image_url_content)
 
-    log.info(f"调用 OpenAI Chat ({DEFAULT_MODEL_OPENAI})... Messages count: {len(messages)}")
-    log.debug(f"OpenAI Messages Payload: {messages}") # Log full payload only in debug
+    if current_user_content_parts:
+        messages.append({"role": "user", "content": current_user_content_parts})
+    elif not messages:
+        log.warning("OpenAI chat called with no history, no prompt, and no image.")
+        return "请输入您的问题或提供图片。"
 
+    log.info(f"调用 OpenAI Chat (Model: {effective_model_id}). Image: {'Yes' if image_base64 else 'No'}. Msgs: {len(messages)}")
     try:
-        # (可选) 定义生成参数，例如 max_tokens
-        # generation_params = {
-        #    "max_tokens": 2048, # 示例：增加 token 上限
-        #    "temperature": 0.7,
-        # }
-
+        # openai_max_tokens = getattr(settings, 'OPENAI_MAX_TOKENS', 2048) # Safer access
+        openai_max_tokens = settings.MAX_TEXT_FILE_CHARS # Or a specific OpenAI token limit from settings
         chat_completion = client.chat.completions.create(
-            model=DEFAULT_MODEL_OPENAI,
+            model=effective_model_id,
             messages=messages,
-            # **generation_params # Add other params if needed
-            max_completion_tokens=2048
-            # max_tokens=2048 # 直接在这里设置，覆盖默认值
+            max_tokens=openai_max_tokens 
         )
         response_content = chat_completion.choices[0].message.content
         log.info("OpenAI Chat 调用成功。")
-        return response_content.strip() if response_content else "" # Handle empty response
-
+        return response_content.strip() if response_content else ""
     except openai.APIError as e:
-        log.error(f"OpenAI API error: {e}", exc_info=True)
-        raise # Re-raise the exception to be caught by chat_only
+        log.error(f"OpenAI API error (Model: {effective_model_id}): {e}", exc_info=True)
+        raise
 
-def _chat_openai_stream(prompt: str, history: Optional[List[Dict[str, Any]]] = None, stream_callback=None) -> str:
-    """
-    调用 OpenAI Chat 模型，支持流式输出。
-
-    Args:
-        prompt: 当前用户的输入。
-        history: 对话历史列表。
-        stream_callback: 接收流式输出块的回调函数。
-
-    Returns:
-        模型生成的完整回复文本。
-    """
+def _chat_openai_stream(
+    prompt: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+    stream_callback: Optional[Callable[[str], None]] = None,
+    model_id: Optional[str] = None,
+    image_base64: Optional[str] = None
+) -> str:
     if not settings.openai_api_key:
         raise ValueError("OpenAI API key not configured.")
+    http_client_with_proxy = settings.get_httpx_client()
+    client = openai.OpenAI(api_key=settings.openai_api_key, http_client=http_client_with_proxy)
+    effective_model_id = model_id or get_default_model_for_provider(ModelProvider.OPENAI)
+    if not effective_model_id: effective_model_id = "gpt-4o"
 
-    client = openai.OpenAI(api_key=settings.openai_api_key, http_client=settings.get_httpx_client())
+    messages: List[Dict[str, Any]] = []
+    system_message = _prepare_system_message(ModelProvider.OPENAI)
+    if system_message: messages.append(system_message)
     
-    # 构建 OpenAI messages 列表
-    messages = [{"role": "system", "content": "You are a helpful assistant."}]
-    
-    # 添加历史
     if history:
         for turn in history:
             role = turn.get("role")
             openai_role = "assistant" if role == "model" else role
-            try:
-                content = turn.get("parts", [{}])[0].get("text", "")
-                if openai_role in ["user", "assistant"] and content:
-                    messages.append({"role": openai_role, "content": content})
-            except (IndexError, AttributeError, TypeError):
-                log.warning(f"Skipping invalid history turn for OpenAI: {turn}")
+            text_content = None
+            if isinstance(turn.get("parts"), list) and turn["parts"]:
+                text_content = turn["parts"][0].get("text", "")
+            elif isinstance(turn.get("content"), str):
+                text_content = turn.get("content", "")
+            if openai_role in ["user", "assistant"] and text_content:
+                 messages.append({"role": openai_role, "content": text_content})
 
-    # 添加当前用户提示
+    current_user_content_parts: List[Dict[str, Any]] = []
     if prompt:
-        messages.append({"role": "user", "content": prompt})
+        current_user_content_parts.append({"type": "text", "text": prompt})
+    if image_base64:
+        image_url_content = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+        current_user_content_parts.append(image_url_content)
 
-    log.info(f"调用 OpenAI Chat Stream ({DEFAULT_MODEL_OPENAI})... Messages count: {len(messages)}")
-    
+    if current_user_content_parts:
+        messages.append({"role": "user", "content": current_user_content_parts})
+    elif not messages:
+        log.warning("OpenAI stream chat called with no history, no prompt, and no image.")
+        if stream_callback: stream_callback("[ERROR: 请输入您的问题或提供图片。]")
+        return "请输入您的问题或提供图片。"
+
+    log.info(f"调用 OpenAI Chat Stream (Model: {effective_model_id}). Image: {'Yes' if image_base64 else 'No'}. Msgs: {len(messages)}")
     try:
-        # 创建流式响应
+        # openai_max_tokens_stream = getattr(settings, 'OPENAI_MAX_TOKENS_STREAM', 2048)
+        openai_max_tokens_stream = settings.MAX_TEXT_FILE_CHARS # Or specific stream token limit
         stream = client.chat.completions.create(
-            model=DEFAULT_MODEL_OPENAI,
+            model=effective_model_id,
             messages=messages,
-            # max_tokens=2048,
-            max_completion_tokens=2048,
-            stream=True  # 启用流式输出
+            max_tokens=openai_max_tokens_stream,
+            stream=True
         )
-        
-        full_response = ""
-        
-        # 处理流式响应
+        full_response_text = ""
         for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                full_response += content
+            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                content_chunk = chunk.choices[0].delta.content
+                full_response_text += content_chunk
                 if stream_callback:
-                    stream_callback(content)
-        
+                    stream_callback(content_chunk)
         log.info("OpenAI Chat Stream 调用成功。")
-        return full_response.strip()
-        
+        return full_response_text.strip()
+    except openai.APIError as e:
+        log.error(f"OpenAI API stream error (Model: {effective_model_id}): {e}", exc_info=True)
+        if stream_callback: stream_callback(f"[ERROR: OpenAI API Error - {str(e)}]")
+        raise
     except Exception as e:
-        log.error(f"OpenAI API error: {e}", exc_info=True)
+        log.error(f"Unexpected error during OpenAI stream (Model: {effective_model_id}): {e}", exc_info=True)
+        if stream_callback: stream_callback(f"[ERROR: Unexpected error - {str(e)}]")
         raise
 
-# === Gemini Chat Function (with History) ===
+# === Gemini Chat Function (Multimodal) ===
+def _configure_gemini_if_needed():
+    """Configures Gemini API key. Relies on env vars for proxies."""
+    # This function assumes genai.configure might be called multiple times
+    # but ideally it's called once at app startup.
+    # This check is a bit heuristic and might not be perfectly robust
+    # for all states of the genai library.
+    configured_api_key = None
+    try:
+        # Attempt to get a model to see if it's configured; this is indirect
+        # A more direct way to check if `configure` has been called with a key
+        # is not readily available in the public API of google-generativeai.
+        # We assume if we can get a model without error, it's likely configured.
+        # This is not ideal, but avoids the 'अभीClient' error.
+        genai.get_model("gemini-pro") # Try a common model
+        # If the above doesn't raise an error about API key, it might be configured.
+        # However, there's no direct way to get the currently configured key.
+        # So, we will re-configure if settings.gemini_api_key is present,
+        # as genai.configure can be called multiple times.
+    except Exception: # pylint: disable=broad-except
+        # Likely not configured or API key issue
+        pass # We will configure below if key is present in settings
 
-# def _chat_gemini(prompt: str, history: Optional[List[Dict[str, Any]]] = None) -> str:
-#     """
-#     调用 Google Gemini 模型，并支持传入对话历史。
-#     代理通过环境变量 HTTP_PROXY/HTTPS_PROXY 配置。
-#     """
-#     if not settings.gemini_api_key:
-#         raise ValueError("Gemini API key not configured.")
-
-#     # --- 移除显式的代理配置 ---
-#     # proxies = settings.get_proxy_dict() # 不再需要调用这个方法获取字典
-#     # genai.configure(
-#     #    api_key=settings.gemini_api_key,
-#     #    transport='rest',
-#     #    client_options={"proxies": proxies} if proxies else None # <--- 删除这行或将其注释掉
-#     # )
-#     # --- End 移除 ---
-
-#     # --- 简化配置：库应自动读取环境变量 ---
-#     # 只需要配置 API Key。代理会从环境变量读取。
-#     # 确保环境变量已通过 settings.py 中的 load_dotenv 加载
-#     genai.configure(api_key=settings.gemini_api_key)
-#     # transport='rest' 可能不再需要显式设置，库会选择合适的
-#     # 如果遇到问题，可以尝试加回 transport='rest'
-#     # genai.configure(api_key=settings.gemini_api_key, transport='rest')
-
-#     # 确认环境变量是否真的设置了（可选的调试日志）
-#     # log.debug(f"Gemini Check - HTTP_PROXY env var: {os.getenv('HTTP_PROXY')}")
-#     # log.debug(f"Gemini Check - HTTPS_PROXY env var: {os.getenv('HTTPS_PROXY')}")
-
-
-#     # --- 构建 Gemini contents 列表 ---
-#     full_conversation = history if history else []
-#     if prompt:
-#         current_user_content = {'role': 'user', 'parts': [{'text': prompt}]}
-#         full_conversation.append(current_user_content)
-#     else:
-#          if not full_conversation:
-#               log.warning("Gemini chat called with empty prompt and empty history.")
-#               return "请输入您的问题。"
-
-#     # --- 配置生成参数 ---
-#     gen_cfg = genai.types.GenerationConfig(
-#         max_output_tokens=2048,
-#         temperature=0.7
-#     )
-#     model = genai.GenerativeModel(DEFAULT_MODEL_GEMINI)
-
-#     log.info(f"调用 Gemini Chat ({DEFAULT_MODEL_GEMINI})... Turns: {len(full_conversation)}")
-#     # log.debug(f"Gemini Contents Payload: {full_conversation}") # Keep for debugging if needed
-
-#     try:
-#         response = model.generate_content(
-#             contents=full_conversation,
-#             generation_config=gen_cfg,
-#         )
-#         # ... (处理 response 的代码不变) ...
-#         if response.parts:
-#              log.debug(f"Gemini response.parts content: {[part.text for part in response.parts]}")
-#              response_text = "".join(part.text for part in response.parts)
-#         else:
-#             response_text = "(AI未能生成有效回复，可能已被安全设置阻止)"
-#             log.warning(f"Gemini response missing parts. Finish reason: {response.prompt_feedback}")
-
-#         log.info("Gemini Chat 调用成功。")
-#         return response_text.strip()
-
-#     except Exception as e:
-#         log.error(f"Gemini API error: {e}", exc_info=True)
-#         # 可以添加更具体的错误类型检查，比如 google.api_core.exceptions.PermissionDenied
-#         if "API key not valid" in str(e):
-#              return "Gemini API Key 无效，请检查配置。"
-#         # 其他通用错误
-#         raise # Re-raise the exception
-
-# ... chat_only 函数 和 _chat_openai 函数 保持不变 (除非要移除 OpenAI 的代理调用) ...
+    if settings.gemini_api_key:
+        try:
+            genai.configure(api_key=settings.gemini_api_key) # Removed transport and client_options
+            log.debug("Gemini API configured/re-configured with API key from settings.")
+            # http_proxy_env = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
+            # https_proxy_env = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
+            # log.debug(f"Gemini proxy check - HTTP_PROXY env: {http_proxy_env}, HTTPS_PROXY env: {https_proxy_env}")
+        except Exception as e_cfg:
+            log.error(f"Failed to configure Gemini API: {e_cfg}", exc_info=True)
+            raise ConnectionError(f"Failed to configure Gemini API: {e_cfg}") from e_cfg
+    else:
+        raise ValueError("Gemini API key not found in settings for configuration.")
 
 
+def _chat_gemini(
+    prompt: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+    model_id: Optional[str] = None,
+    image_base64: Optional[str] = None
+) -> str:
+    _configure_gemini_if_needed() # Ensure API key is configured
+
+    effective_model_id = model_id or get_default_model_for_provider(ModelProvider.GEMINI)
+    if not effective_model_id: effective_model_id = "gemini-1.5-flash-latest" # Ensure this is a vision model
+    
+    gemini_contents: List[Dict[str, Any]] = []
+    if history:
+        for turn in history:
+            role = turn.get("role")
+            if role not in ["user", "model"]: continue
+            parts_data = turn.get("parts")
+            gemini_parts = []
+            if isinstance(parts_data, list):
+                for part_item in parts_data:
+                    if isinstance(part_item, dict) and "text" in part_item and str(part_item["text"]).strip():
+                        gemini_parts.append({"text": str(part_item["text"])})
+            elif isinstance(parts_data, str) and parts_data.strip():
+                gemini_parts.append({"text": parts_data})
+            elif isinstance(turn.get("content"), str) and str(turn.get("content")).strip(): # OpenAI history format
+                gemini_parts.append({"text": str(turn.get("content"))})
+            if gemini_parts: gemini_contents.append({'role': role, 'parts': gemini_parts})
+
+    current_user_parts: List[Any] = []
+    if prompt:
+        current_user_parts.append(prompt)
+    pil_image = None
+    if image_base64:
+        try:
+            image_bytes = base64.b64decode(image_base64)
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            current_user_parts.append(pil_image)
+        except Exception as e_img:
+            log.error(f"Failed to decode/open image for Gemini: {e_img}", exc_info=True)
+            current_user_parts.append("(Error processing provided image)")
+    
+    if current_user_parts:
+        # Simplified logic: always append new user turn if there's content
+        gemini_contents.append({'role': 'user', 'parts': current_user_parts})
+    elif not gemini_contents: # No history and no current input
+         log.warning("Gemini chat called with no history, no prompt, and no image.")
+         return "请输入您的问题或提供图片。"
+
+    if not gemini_contents: # Final check if somehow still empty
+        log.warning("Gemini chat: No valid content to send.")
+        return "无法处理请求，对话内容为空。"
+
+    model_params = {"model_name": effective_model_id}
+    # system_instruction = _prepare_system_message(ModelProvider.GEMINI) # Returns None currently
+    # if system_instruction and system_instruction.get('parts'):
+    #     model_params["system_instruction"] = system_instruction['parts']
+
+    model = genai.GenerativeModel(**model_params)
+    
+    # gemini_max_tokens = getattr(settings, 'GEMINI_MAX_TOKENS', 2048)
+    # gemini_temperature = getattr(settings, 'GEMINI_TEMPERATURE', 0.7)
+    gemini_max_tokens = settings.MAX_TEXT_FILE_CHARS
+    gemini_temperature = 0.7
+
+    generation_config = genai.types.GenerationConfig(
+        max_output_tokens=gemini_max_tokens,
+        temperature=gemini_temperature
+    )
+
+    log.info(f"调用 Gemini Chat (Model: {effective_model_id}). Image: {'Yes' if pil_image else 'No'}. Turns: {len(gemini_contents)}")
+    try:
+        response = model.generate_content(
+            contents=gemini_contents,
+            generation_config=generation_config,
+            # request_options={"timeout": getattr(settings, 'GEMINI_REQUEST_TIMEOUT', 120)}
+        )
+        response_text = ""
+        if hasattr(response, 'parts') and response.parts:
+            for part in response.parts:
+                if hasattr(part, 'text'): response_text += part.text
+        elif hasattr(response, 'text') and response.text:
+            response_text = response.text
+        
+        if not response_text: # Check for blocking or other finish reasons
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                reason = response.prompt_feedback.block_reason.name
+                log.warning(f"Gemini response blocked. Reason: {reason}. Feedback: {response.prompt_feedback}")
+                return f"(内容因 {reason} 被阻止)"
+            if hasattr(response, 'candidates') and response.candidates and \
+               response.candidates[0].finish_reason != genai.types.FinishReason.STOP:
+                finish_reason_name = response.candidates[0].finish_reason.name
+                log.warning(f"Gemini generation finished with non-STOP reason: {finish_reason_name}. Safety: {response.candidates[0].safety_ratings}")
+                if response.candidates[0].finish_reason == genai.types.FinishReason.SAFETY:
+                     return "(内容因安全原因被终止或过滤)"
+                # return f"(内容生成因 {finish_reason_name} 停止)" # Potentially too verbose
+
+        log.info("Gemini Chat 调用成功 (或API调用完成).")
+        return response_text.strip() if response_text else "(AI未能生成有效文本回复)"
+
+    except google_api_exceptions.InvalidArgument as e:
+        log.error(f"Gemini API InvalidArgument (Model {effective_model_id}): {e}", exc_info=True)
+        return f"AI请求参数错误 (Gemini): {str(e)[:200]}"
+    except google_api_exceptions.PermissionDenied as e:
+        log.error(f"Gemini API PermissionDenied (Model {effective_model_id}): {e}", exc_info=True)
+        return f"Gemini API密钥无效或权限不足。请检查配置。"
+    except google_api_exceptions.ResourceExhausted as e:
+        log.error(f"Gemini API ResourceExhausted (Model {effective_model_id}): {e}", exc_info=True)
+        return f"Gemini API资源用尽 (例如达到配额)。请稍后再试。"
+    except google_api_exceptions.FailedPrecondition as e:
+        log.error(f"Gemini API FailedPrecondition (Model {effective_model_id}): {e}", exc_info=True)
+        return f"调用Gemini API的前提条件不满足 (例如API未启用): {str(e)[:200]}"
+    except google_api_exceptions.GoogleAPIError as e: # Catch other Google API errors
+        log.error(f"Gemini API error (Model {effective_model_id}): {e}", exc_info=True)
+        raise
+    except Exception as e:
+        log.error(f"Unexpected error during Gemini API call (Model {effective_model_id}): {e}", exc_info=True)
+        raise
 
 def _chat_gemini_stream(
     prompt: str,
     history: Optional[List[Dict[str, Any]]] = None,
     stream_callback: Optional[Callable[[str], None]] = None,
-    # model_name: Optional[str] = None # 如果仍然希望调用时能覆盖模型，可以保留此参数
-                                     # 否则，将始终使用 constants.py 中的 DEFAULT_MODEL_GEMINI
+    model_id: Optional[str] = None,
+    image_base64: Optional[str] = None
 ) -> str:
-    """
-    调用 Gemini Chat 模型，支持流式输出。
-    使用 settings.py 中配置的 API 密钥和 constants.py 中定义的默认模型。
+    _configure_gemini_if_needed()
 
-    Args:
-        prompt: 当前用户的输入。
-        history: 对话历史列表。
-        stream_callback: 接收流式输出块的回调函数。
-        # model_name: (可选) 如果提供，则覆盖 constants.py 中的 DEFAULT_MODEL_GEMINI。
+    effective_model_id = model_id or get_default_model_for_provider(ModelProvider.GEMINI)
+    if not effective_model_id: effective_model_id = "gemini-1.5-flash-latest"
 
-    Returns:
-        模型生成的完整回复文本，如果发生错误或内容被阻止，则返回相应的提示信息。
-    """
-    if not settings.gemini_api_key:
-        log.error("Gemini API key not configured in settings.")
-        # 在实际应用中，可能希望向上层抛出自定义异常或返回特定错误对象
-        raise ValueError("Gemini API 密钥未在设置中配置。")
-
-    # API Key 配置应该在应用启动时完成。
-    # 此处不再调用 genai.configure()，假设它已在应用级别完成。
-    # 如果没有全局配置，并且您希望每次调用都确保配置，需要取消注释下一行
-    # 并在应用级别配置和此处配置之间做出选择。
-    # genai.configure(api_key=settings.gemini_api_key)
-
-
-    # 获取模型名称
-    # 如果希望允许函数参数覆盖常量，则使用下面注释掉的行
-    # current_model_name = model_name if model_name else DEFAULT_MODEL_GEMINI
-    current_model_name = DEFAULT_MODEL_GEMINI # 直接使用 constants.py 中定义的默认模型
-
-    # 构建 Gemini contents 列表
-    # Gemini API 要求 'user' 和 'model'角色交替，且第一条通常是 'user'
-    # 如果 history 直接来自 Gemini 的输出，它应该已经是正确的格式
-    full_conversation: List[Dict[str, Any]] = []
+    gemini_contents: List[Dict[str, Any]] = []
+    # (History and current_user_parts construction as in _chat_gemini)
     if history:
-        for entry in history:
-            # 基本验证，确保 entry 是字典且包含期望的键
-            if isinstance(entry, dict) and 'role' in entry and 'parts' in entry:
-                # 确保 parts 是一个列表
-                if isinstance(entry['parts'], list) and all(isinstance(p, dict) and 'text' in p for p in entry['parts']):
-                    full_conversation.append(entry)
-                elif isinstance(entry['parts'], str): # 兼容 parts 直接是字符串的情况 (不标准但可能遇到)
-                    full_conversation.append({'role': entry['role'], 'parts': [{'text': entry['parts']}]})
-                else:
-                    log.warning(f"Skipping history entry with invalid 'parts' format: {entry}")
-            else:
-                log.warning(f"Skipping invalid history entry: {entry}")
+        for turn in history:
+            role = turn.get("role")
+            if role not in ["user", "model"]: continue
+            parts_data = turn.get("parts")
+            gemini_parts = []
+            if isinstance(parts_data, list):
+                for part_item in parts_data:
+                    if isinstance(part_item, dict) and "text" in part_item and str(part_item["text"]).strip():
+                        gemini_parts.append({"text": str(part_item["text"])})
+            elif isinstance(parts_data, str) and parts_data.strip():
+                gemini_parts.append({"text": parts_data})
+            elif isinstance(turn.get("content"), str) and str(turn.get("content")).strip():
+                gemini_parts.append({"text": str(turn.get("content"))})
+            if gemini_parts: gemini_contents.append({'role': role, 'parts': gemini_parts})
 
-    if prompt: # 只有当 prompt 非空且非 None 时才添加
-        # 检查最后一条消息的角色，确保不会连续发送两条 'user' 消息 (如果历史的最后一条也是 'user')
-        # 虽然 Gemini API 可能能处理，但最佳实践是交替角色。
-        # 不过，如果 prompt 是对 model 最后回复的响应，直接添加 'user' 消息是正确的。
-        current_user_content = {'role': 'user', 'parts': [{'text': prompt}]}
-        full_conversation.append(current_user_content)
-    elif not full_conversation: # 如果 prompt 为空且历史也为空
-        log.warning("Gemini chat called with empty prompt and empty history.")
-        return "请输入您的问题或提供对话历史。"
-    
-    # 如果 full_conversation 为空（例如，prompt 为空，history 也为空或无效）
-    if not full_conversation:
-        log.warning("Cannot call Gemini: conversation history is empty after processing inputs.")
+    current_user_parts: List[Any] = []
+    if prompt:
+        current_user_parts.append(prompt)
+    pil_image = None
+    if image_base64:
+        try:
+            image_bytes = base64.b64decode(image_base64)
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            current_user_parts.append(pil_image)
+        except Exception as e_img:
+            log.error(f"Failed to decode/open image for Gemini stream: {e_img}", exc_info=True)
+            current_user_parts.append("(Error processing image for stream)")
+    if current_user_parts:
+        gemini_contents.append({'role': 'user', 'parts': current_user_parts})
+    elif not gemini_contents:
+        log.warning("Gemini stream: No content to send.")
+        if stream_callback: stream_callback("[ERROR: 请输入问题或提供图片。]")
+        return "请输入问题或提供图片。"
+    if not gemini_contents:
+        log.warning("Gemini stream: No valid content to send.")
+        if stream_callback: stream_callback("[ERROR: 无法处理请求，对话内容为空。]")
         return "无法处理请求，对话内容为空。"
 
 
-    # 配置生成参数
-    gen_cfg_params = {
-        "max_output_tokens": 2048, # 根据您的需求调整
-        "temperature": 0.7,        # 调整创造性与事实性之间的平衡
-        # "top_p": 0.9,            # 如果需要，可以添加 top_p
-        # "top_k": 40,             # 如果需要，可以添加 top_k
-        # "candidate_count": 1    # 流式输出通常只处理第一个候选
-    }
-    generation_config = genai.types.GenerationConfig(**gen_cfg_params)
+    model_params = {"model_name": effective_model_id}
+    model = genai.GenerativeModel(**model_params)
+    
+    # gemini_max_tokens_stream = getattr(settings, 'GEMINI_MAX_TOKENS_STREAM', 2048)
+    # gemini_temperature_stream = getattr(settings, 'GEMINI_TEMPERATURE_STREAM', 0.7)
+    gemini_max_tokens_stream = settings.MAX_TEXT_FILE_CHARS
+    gemini_temperature_stream = 0.7
 
-    # 代理配置：如前所述，依赖于应用启动时通过环境变量设置的代理。
-    # 检查 settings.py 中的 get_proxy_dict() 和应用启动时的 os.environ 设置。
-
+    generation_config = genai.types.GenerationConfig(
+        max_output_tokens=gemini_max_tokens_stream,
+        temperature=gemini_temperature_stream
+    )
+    log.info(f"调用 Gemini Chat Stream (Model: {effective_model_id}). Image: {'Yes' if pil_image else 'No'}. Turns: {len(gemini_contents)}")
     try:
-        model = genai.GenerativeModel(current_model_name)
-        log.info(f"调用 Gemini Chat Stream ({current_model_name})... Turns: {len(full_conversation)}")
-        log.debug(f"Conversation content being sent to Gemini: {json.dumps(full_conversation, indent=2, ensure_ascii=False)}")
-
-
         response_stream = model.generate_content(
-            contents=full_conversation,
+            contents=gemini_contents,
             generation_config=generation_config,
-            stream=True
+            stream=True,
+            # request_options={"timeout": getattr(settings, 'GEMINI_REQUEST_TIMEOUT_STREAM', 180)}
         )
-
         accumulated_response_text = ""
         for chunk in response_stream:
             chunk_text = ""
-            # Gemini 1.5 Pro/Flash 及更新版本通常将文本放在 chunk.parts 中
-            if chunk.parts:
+            if hasattr(chunk, 'parts') and chunk.parts:
                 for part in chunk.parts:
-                    if hasattr(part, 'text') and part.text: # 确保 part 有 text 属性且不为 None
-                        chunk_text += part.text
-            # 兼容旧版或某些模型可能直接在 chunk 上有 text 属性
+                    if hasattr(part, 'text') and part.text: chunk_text += part.text
             elif hasattr(chunk, 'text') and chunk.text:
                 chunk_text = chunk.text
             
-            # 安全评级处理 (可以在每个块中检查，也可以在最后检查)
-            # chunk.prompt_feedback 包含对提示的安全评估
-            # chunk.candidates[0].finish_reason (如果有 candidates 属性)
-            # chunk.candidates[0].safety_ratings
-
-            if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback and chunk.prompt_feedback.block_reason:
-                reason = chunk.prompt_feedback.block_reason
-                reason_msg = chunk.prompt_feedback.block_reason_message or f"输入内容因安全原因 ({reason}) 被阻止。"
-                log.warning(f"Gemini API: Prompt or part of it was blocked during streaming. Reason: {reason_msg}")
-                if not accumulated_response_text: # 如果是第一个块就被阻止
-                    return reason_msg # 提前返回
-
+            if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback.block_reason:
+                reason = chunk.prompt_feedback.block_reason.name
+                log.warning(f"Gemini stream: Prompt blocked. Reason: {reason}")
+                if stream_callback: stream_callback(f"[内容因 {reason} 被阻止]")
+                if not accumulated_response_text: return f"(内容因 {reason} 被阻止)"
+            if hasattr(chunk, 'candidates') and chunk.candidates and \
+               chunk.candidates[0].finish_reason == genai.types.FinishReason.SAFETY:
+                log.warning(f"Gemini stream: Safety stop. Ratings: {chunk.candidates[0].safety_ratings}")
+                if stream_callback: stream_callback("[内容因安全原因被终止]")
+                if not accumulated_response_text: return "(内容因安全原因被终止)"
+                break
             if chunk_text:
                 accumulated_response_text += chunk_text
                 if stream_callback:
-                    try:
-                        stream_callback(chunk_text)
-                    except Exception as cb_exc:
-                        log.error(f"Stream callback error: {cb_exc}", exc_info=True)
-            
-            # 更细致地检查候选者的完成原因和安全评级 (如果可用)
-            if hasattr(chunk, 'candidates') and chunk.candidates:
-                for candidate in chunk.candidates:
-                    if candidate.finish_reason == genai.types.FinishReason.SAFETY:
-                        safety_message = "内容生成因安全原因被终止。"
-                        # 尝试获取更详细的安全信息
-                        # ratings_info = ", ".join([f"{rating.category.name}: {rating.probability.name}" for rating in candidate.safety_ratings])
-                        # if ratings_info:
-                        #     safety_message += f" 安全评级: [{ratings_info}]"
-                        log.warning(safety_message)
-                        # 根据策略，可以选择在这里停止并返回，或者继续处理已累积的文本
-                        if not accumulated_response_text: # 如果还没有任何文本，则返回安全信息
-                            return safety_message
-                        # 否则，可能已经通过 stream_callback 发送了部分内容
-                        # 可以在累积文本后附加一个警告
-
+                    try: stream_callback(chunk_text)
+                    except Exception as cb_exc: log.error(f"Stream callback error: {cb_exc}", exc_info=True)
+        
         log.info("Gemini Chat Stream 调用成功。")
-        if not accumulated_response_text.strip() and len(full_conversation) > 0:
-            log.warning("Gemini stream returned no text content, though the call seemed successful.")
-            # 这种情况可能表示所有生成的内容都被静默过滤，或者是一个非常简短的、无意义的回复
-            # 可以返回一个通用提示，或者根据具体情况进一步分析 response_stream (如果 API 允许)
-            return "模型没有返回可显示的文本内容。"
-            
+        if not accumulated_response_text.strip() and not (hasattr(response_stream, '_error') or \
+           (hasattr(response_stream, 'prompt_feedback') and response_stream.prompt_feedback.block_reason)): # type: ignore
+            log.warning("Gemini stream returned no text, no explicit error/block.")
+            return "(AI未能生成有效文本回复)"
         return accumulated_response_text.strip()
-
-        # 使用 genai.types 访问 Gemini 特定的异常，或者显式导入它们
-    except genai.types.BlockedPromptException as bpe: # <--- 修改：使用 genai.types
-        log.error(f"Gemini API error: Prompt was blocked before generation. {bpe.args}", exc_info=False)
-        return "您的提问内容因安全原因被完全阻止。"
-    except genai.types.StopCandidateException as sce: # <--- 修改：使用 genai.types
-        log.error(f"Gemini API error: Candidate generation stopped. {sce.args}", exc_info=False)
-        if accumulated_response_text:
-            return accumulated_response_text.strip() + "\n[内容可能因安全或其他原因被截断]"
-        return "内容生成因故停止。"
-    # 使用导入的 google_api_exceptions 别名访问核心 API 异常
-    except google_api_exceptions.InvalidArgument as iae: # <--- 修改
-        log.error(f"Gemini API error: Invalid argument. {iae}", exc_info=True)
-        if "contents" in str(iae).lower() or "role" in str(iae).lower():
-            return f"请求格式错误，请检查对话历史和提示的结构。错误: {iae}"
-        return f"请求参数无效。错误: {iae}"
-    except google_api_exceptions.PermissionDenied as pde: # <--- 修改
-        log.error(f"Gemini API error: Permission denied. Check API key and API enablement. {pde}", exc_info=True)
-        return "Gemini API 密钥无效或权限不足，或者API未在项目中启用。"
-    except google_api_exceptions.ResourceExhausted as ree: # <--- 修改
-        log.error(f"Gemini API error: Resource exhausted (e.g., quota). {ree}", exc_info=True)
-        return "Gemini API 资源不足（例如已达到配额），请稍后再试或检查您的配额。"
-    except google_api_exceptions.DeadlineExceeded as dee: # <--- 修改
-        log.error(f"Gemini API error: Deadline exceeded. {dee}", exc_info=True)
-        return "连接 Gemini 服务超时，请检查网络连接或稍后再试。"
-    except google_api_exceptions.ServiceUnavailable as sue: # <--- 修改
-        log.error(f"Gemini API error: Service unavailable. {sue}", exc_info=True)
-        return "Gemini 服务当前不可用，请稍后再试。"
     except Exception as e:
-        log.error(f"Unexpected error during Gemini API call: {e}", exc_info=True)
-        return f"调用 Gemini 服务时发生未知错误: {type(e).__name__}"
+        log.error(f"Error during Gemini stream (Model {effective_model_id}): {e}", exc_info=True)
+        if stream_callback: stream_callback(f"[ERROR: Gemini Stream Error - {str(e)}]")
+        raise
 
-
-
-
-
-
-
-
-
-
-def _chat_gemini(prompt: str, history: Optional[List[Dict[str, Any]]] = None) -> str:
-    """
-    调用 Google Gemini 模型，并支持传入对话历史。
-    代理通过环境变量 HTTP_PROXY/HTTPS_PROXY 配置。
-    """
-    if not settings.gemini_api_key:
-        # It's better to raise a more specific error or handle it gracefully
-        # so the caller (chat_only) can return a proper error message to the UI.
-        log.error("Gemini API key not configured.")
-        raise ValueError("Gemini API key not configured.") # Or return an error string
-
-    # API Key configuration should ideally be done once at application startup.
-    # If genai.configure is called múltiplas vezes, it's generally fine but not optimal.
+# === Main Chat Dispatcher Functions (Multimodal) ===
+# (chat_only 和 chat_only_stream 函数保持与我上次提供的版本一致，它们调用上面修改过的内部函数)
+def chat_only(
+    prompt: str, history: Optional[List[Dict[str, Any]]] = None,
+    model_id: Optional[str] = None, provider: Optional[str] = None,
+    image_base64: Optional[str] = None
+) -> Dict[str, Any]:
+    current_provider = provider
+    current_model_id = model_id
+    if not current_provider:
+        if current_model_id:
+            for p_name, models in ALL_AVAILABLE_MODELS.items():
+                if current_model_id in models: current_provider = p_name; break
+        if not current_provider: current_provider = settings.image_analysis_provider or ModelProvider.OPENAI
+    if not current_model_id:
+        current_model_id = get_default_model_for_provider(current_provider) # type: ignore
+    if not current_model_id or not current_provider:
+        log.error(f"Could not determine model/provider. P: {current_provider}, M: {current_model_id}")
+        return {"provider": "error", "message": "无法确定AI模型或提供商。"}
+    if current_provider not in ALL_AVAILABLE_MODELS or \
+       current_model_id not in ALL_AVAILABLE_MODELS.get(current_provider, {}): # type: ignore
+        log.error(f"Model '{current_model_id}' invalid for provider '{current_provider}'.")
+        return {"provider": "error", "model_id": current_model_id, "message": f"模型 {current_model_id} 对提供商 {current_provider} 无效。"}
+    log.info(f"Dispatching chat. Provider: {current_provider}, Model: {current_model_id}, Image: {'Yes' if image_base64 else 'No'}")
     try:
-        genai.configure(api_key=settings.gemini_api_key)
-    except Exception as e:
-        log.error(f"Failed to configure Gemini API: {e}")
-        raise ConnectionError(f"Failed to configure Gemini API: {e}") from e
-
-
-    # --- 构建清理过的 Gemini contents 列表 ---
-    clean_conversation: List[Dict[str, Any]] = [] # Explicitly type for clarity
-    if history:
-        for turn in history:
-            role = turn.get('role')
-            original_parts = turn.get('parts')
-            
-            valid_parts: List[Dict[str, Any]] = [] # Explicitly type
-            if isinstance(original_parts, list):
-                for part in original_parts:
-                    if isinstance(part, dict):
-                        text_content = part.get('text')
-                        # Gemini also supports 'inline_data' for images, etc.
-                        # For a pure text chat, we primarily care about 'text'.
-                        # If 'text' is present and not an empty string (after stripping), it's valid.
-                        if text_content is not None and str(text_content).strip() != "":
-                            valid_parts.append({'text': str(text_content).strip()})
-                        # else: (Optional logging for skipped empty text parts)
-                        #     log.debug(f"Skipping part with empty or None text: {part} in turn: {turn}")
-                    # else: (Optional logging for parts that are not dicts)
-                    #    log.debug(f"Skipping part because it's not a dictionary: {part} in turn: {turn}")
-
-            elif isinstance(original_parts, str) and original_parts.strip() != "":
-                # Handle cases where 'parts' might be a non-empty string (though not standard Gemini format)
-                valid_parts = [{'text': original_parts.strip()}]
-            
-            if role in ['user', 'model'] and valid_parts:
-                clean_turn = {
-                    'role': role,
-                    'parts': valid_parts
-                }
-                clean_conversation.append(clean_turn)
-            # else: (Optional: log skipped turns due to role/parts issues)
-            #    log.warning(f"Skipping turn due to invalid role, or no valid parts after cleaning: {turn}")
-
-    # --- 处理当前用户的 prompt ---
-    if prompt and prompt.strip() != "":
-        current_user_prompt_text = prompt.strip()
-        current_user_content = {'role': 'user', 'parts': [{'text': current_user_prompt_text}]}
-        
-        # Logic to prevent adding duplicate user message if it's same as the last one in history
-        if not clean_conversation:
-            clean_conversation.append(current_user_content)
-        elif clean_conversation[-1]['role'] == 'user':
-            # If last message was also user, decide what to do.
-            # Option 1: Replace if different, ignore if same.
-            last_user_parts_text = "".join([p.get('text', '') for p in clean_conversation[-1].get('parts', [])])
-            if last_user_parts_text.strip() != current_user_prompt_text:
-                log.info("Last message in history was user, replacing with new different prompt.")
-                clean_conversation[-1] = current_user_content # Replace
-            else:
-                log.info("Current prompt is identical to the last user message in history. Not appending duplicate.")
-        else: # Last message was 'model' or history was empty
-            clean_conversation.append(current_user_content)
-
-    if not clean_conversation:
-        log.warning("Gemini chat called with effectively empty content after cleaning history and prompt.")
-        return "无法处理请求，对话内容为空或无效。" 
-
-    log.info(f"调用 Gemini Chat ({DEFAULT_MODEL_GEMINI})... Cleaned Turns: {len(clean_conversation)}")
-    log.debug(f"Cleaned Gemini Contents Payload: {json.dumps(clean_conversation, indent=2, ensure_ascii=False)}")
-    
-    gen_cfg = genai.types.GenerationConfig(
-        max_output_tokens=2048,
-        temperature=0.7
-    )
-    model = genai.GenerativeModel(DEFAULT_MODEL_GEMINI)
-
-    try:
-        response = model.generate_content(
-            contents=clean_conversation,
-            generation_config=gen_cfg,
-            # request_options={"timeout": 120} # Example: Set a timeout for the API call (in seconds)
-        )
-        
-        # Accessing response.text directly is often simpler if you only expect text.
-        # response.parts is more robust if there could be non-text parts or multiple parts.
-        response_text = ""
-        if response.parts:
-            for part in response.parts:
-                if hasattr(part, 'text'): # Check if the part has a text attribute
-                    response_text += part.text
-            log.debug(f"Gemini response.parts content: {[part.text for part in response.parts if hasattr(part, 'text')]}")
-        elif hasattr(response, 'text') and response.text: # Fallback if .text is directly on response
-             response_text = response.text
-        else: # No text found in parts or directly on response object
-            response_text = "(AI未能生成有效回复，可能已被安全设置阻止或返回空内容)"
-            # Log finish_reason and safety_ratings for more insight
-            finish_reason_str = "N/A"
-            if hasattr(response, 'candidates') and response.candidates:
-                finish_reason_str = str(response.candidates[0].finish_reason)
-                # You can also log safety_ratings here if needed
-            log.warning(f"Gemini response missing parts or text. Finish reason: {finish_reason_str}. Prompt feedback: {response.prompt_feedback if hasattr(response, 'prompt_feedback') else 'N/A'}")
-
-
-        log.info("Gemini Chat 调用成功 (或API调用完成但可能无有效内容).")
-        return response_text.strip()
-
-    except google.api_core.exceptions.InvalidArgument as e:
-        log.error(f"Gemini API InvalidArgument error: {e}", exc_info=True)
-        # This specific error "empty text parameter" should be caught by the cleaning logic now.
-        # If it still occurs, it means some part's text is still empty.
-        if "empty text parameter" in str(e):
-            return "提交给AI的请求中包含了空的文本内容，请检查历史记录或当前输入。"
-        return f"AI请求参数错误: {e}"
-    except google.api_core.exceptions.GoogleAPIError as e: # Catch more general Google API errors
-        log.error(f"Gemini API error: {e}", exc_info=True)
-        if "API key not valid" in str(e) or "PERMISSION_DENIED" in str(e).upper():
-             return "Gemini API Key 无效或权限不足，请检查配置。"
-        # Add more specific error handling based on common GoogleAPIError types if needed
-        return f"调用 Gemini 服务时发生错误: {type(e).__name__}"
-    except Exception as e: # Catch any other unexpected errors
-        log.error(f"Unexpected error during Gemini API call: {e}", exc_info=True)
-        # Re-raise or return a generic error message
-        # Depending on your design, you might want to re-raise to be caught by chat_only
-        raise # Or return "调用AI时发生未知内部错误。"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# === Main Chat Dispatcher Function ===
-
-# 修改函数签名以接受 history
-def chat_only(prompt: str, history: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """
-    根据 settings.image_analysis_provider 调用对应的聊天模型 (OpenAI 或 Gemini)，
-    并传递对话历史记录。
-
-    Args:
-        prompt: 当前用户的输入。
-        history: 对话历史列表 (可选)。
-
-    Returns:
-        一个包含 'provider' 和 'message' 的字典。
-        如果出错，'provider' 为 'error'，'message' 包含错误信息。
-        如果未配置，'provider' 为 'none'。
-    """
-    # 确定使用哪个提供商 (优先使用配置，其次根据 API Key 是否存在判断)
-    provider = settings.image_analysis_provider # 假设这个配置也决定了文本聊天提供商
-    if not provider or provider not in ['openai', 'gemini']:
-         # Fallback logic if provider setting is invalid or missing
-         provider = "openai" if settings.openai_api_key else ("gemini" if settings.gemini_api_key else "none")
-         log.warning(f"Invalid or missing image_analysis_provider setting. Falling back to '{provider}'.")
-
-
-    log.info(f"Dispatching chat request to provider: {provider}")
-
-    try:
-        msg = ""
-        # 调用相应的带历史记录的聊天函数
-        if provider == "openai" and settings.openai_api_key:
-            msg = _chat_openai(prompt, history)
-        elif provider == "gemini" and settings.gemini_api_key:
-            msg = _chat_gemini(prompt, history)
+        msg_text = ""
+        if current_provider == ModelProvider.OPENAI:
+            if not settings.openai_api_key: raise ValueError("OpenAI API Key missing.")
+            msg_text = _chat_openai(prompt, history, current_model_id, image_base64)
+        elif current_provider == ModelProvider.GEMINI:
+            if not settings.gemini_api_key: raise ValueError("Gemini API Key missing.")
+            msg_text = _chat_gemini(prompt, history, current_model_id, image_base64)
         else:
-            log.warning("No chat provider configured or API key missing.")
-            return {"provider": "none", "message": "聊天功能未启用或未配置 API Key。"}
-
-        return {"provider": provider, "message": msg} # 返回成功结果
-
+            log.warning(f"Provider '{current_provider}' not supported or API key missing.")
+            return {"provider": "none", "model_id": current_model_id, "message": f"聊天功能未启用或提供商 '{current_provider}' 不支持。"}
+        return {"provider": current_provider, "model_id": current_model_id, "message": msg_text}
+    except ValueError as ve:
+        log.error(f"Config error for chat with {current_provider}/{current_model_id}: {ve}", exc_info=True)
+        return {"provider": "error", "model_id": current_model_id, "message": f"配置错误: {str(ve)}"}
     except Exception as exc:
-        # 捕获来自 _chat_openai 或 _chat_gemini 的异常
-        log.exception(f"Chat failed using provider '{provider}': {exc}") # Log with traceback
-        # 返回包含错误信息的字典
-        return {"provider": "error", "message": f"与 AI ({provider}) 通信时出错: {str(exc)}"}
+        log.exception(f"Chat failed. Provider: {current_provider}, Model: {current_model_id}")
+        return {"provider": "error", "model_id": current_model_id, "message": f"与 AI ({current_provider}/{current_model_id}) 通信时出错: {str(exc)}"}
 
-def chat_only_stream(prompt: str, history: Optional[List[Dict[str, Any]]] = None, stream_callback=None) -> Dict[str, Any]:
-    """
-    根据 settings.image_analysis_provider 调用对应的聊天模型，支持流式输出。
+def chat_only_stream(
+    prompt: str, history: Optional[List[Dict[str, Any]]] = None,
+    stream_callback: Optional[Callable[[str], None]] = None,
+    model_id: Optional[str] = None, provider: Optional[str] = None,
+    image_base64: Optional[str] = None
+) -> Dict[str, Any]:
+    current_provider = provider
+    current_model_id = model_id
+    if not current_provider:
+        if current_model_id:
+            for p_name, models in ALL_AVAILABLE_MODELS.items():
+                if current_model_id in models: current_provider = p_name; break
+        if not current_provider: current_provider = settings.image_analysis_provider or ModelProvider.OPENAI
+    if not current_model_id:
+        current_model_id = get_default_model_for_provider(current_provider) # type: ignore
 
-    Args:
-        prompt: 当前用户的输入。
-        history: 对话历史列表 (可选)。
-        stream_callback: 接收流式输出块的回调函数。
-
-    Returns:
-        包含 provider 和 message 的字典。
-    """
-    provider = settings.image_analysis_provider or "none"
-    log.info(f"Dispatching stream chat request to provider: {provider}")
-
+    if not current_model_id or not current_provider:
+        log.error(f"Stream: Could not determine model/provider. P: {current_provider}, M: {current_model_id}")
+        if stream_callback: stream_callback("[ERROR: 无法确定AI模型或提供商。]")
+        return {"provider": "error", "message": "无法确定AI模型或提供商。"}
+    if current_provider not in ALL_AVAILABLE_MODELS or \
+       current_model_id not in ALL_AVAILABLE_MODELS.get(current_provider, {}): # type: ignore
+        log.error(f"Stream: Model '{current_model_id}' invalid for provider '{current_provider}'.")
+        if stream_callback: stream_callback(f"[ERROR: 模型 {current_model_id} 对提供商 {current_provider} 无效。]")
+        return {"provider": "error", "model_id": current_model_id, "message": f"模型 {current_model_id} 对提供商 {current_provider} 无效。"}
+    log.info(f"Dispatching STREAM chat. Provider: {current_provider}, Model: {current_model_id}, Image: {'Yes' if image_base64 else 'No'}")
     try:
-        msg = ""
-        if provider == "openai" and settings.openai_api_key:
-            msg = _chat_openai_stream(prompt, history, stream_callback)
-        elif provider == "gemini" and settings.gemini_api_key:
-            msg = _chat_gemini_stream(prompt, history, stream_callback)
+        full_msg_text = ""
+        if current_provider == ModelProvider.OPENAI:
+            if not settings.openai_api_key: raise ValueError("OpenAI API Key missing.")
+            full_msg_text = _chat_openai_stream(prompt, history, stream_callback, current_model_id, image_base64)
+        elif current_provider == ModelProvider.GEMINI:
+            if not settings.gemini_api_key: raise ValueError("Gemini API Key missing.")
+            full_msg_text = _chat_gemini_stream(prompt, history, stream_callback, current_model_id, image_base64)
         else:
-            log.warning("No chat provider configured or API key missing.")
-            return {"provider": "none", "message": "聊天功能未启用或未配置 API Key。"}
-
-        return {"provider": provider, "message": msg}
-
+            log.warning(f"Stream: Provider '{current_provider}' not supported or API key missing.")
+            if stream_callback: stream_callback(f"[ERROR: 流式聊天功能未启用或提供商 '{current_provider}' 不支持。]")
+            return {"provider": "none", "model_id": current_model_id, "message": "流式聊天功能未启用或提供商不支持。"}
+        return {"provider": current_provider, "model_id": current_model_id, "message": full_msg_text}
+    except ValueError as ve:
+        log.error(f"Config error for stream chat with {current_provider}/{current_model_id}: {ve}", exc_info=True)
+        if stream_callback: stream_callback(f"[ERROR: 配置错误 - {str(ve)}]")
+        return {"provider": "error", "model_id": current_model_id, "message": f"配置错误: {str(ve)}"}
     except Exception as exc:
-        log.exception(f"Stream chat failed using provider '{provider}': {exc}")
-        return {"provider": "error", "message": f"与 AI ({provider}) 通信时出错: {str(exc)}"}
+        log.exception(f"Stream chat failed. Provider: {current_provider}, Model: {current_model_id}")
+        if stream_callback: stream_callback(f"[ERROR: 与 AI ({current_provider}/{current_model_id}) 流式通信时出错 - {str(exc)}]")
+        return {"provider": "error", "model_id": current_model_id, "message": f"与 AI ({current_provider}/{current_model_id}) 流式通信时出错: {str(exc)}"}
 
-# --- 导出 ---
-# 确保外部模块只能导入 chat_only 函数
+
 __all__ = ["chat_only", "chat_only_stream"]
 
-# (可选) 添加一些基本的直接运行测试代码
 if __name__ == '__main__':
-    print("测试 chat_only 函数...")
-    # 注意：直接运行此文件需要确保 settings 能正确加载，可能需要设置环境变量
-
-    # --- Test Gemini ---
+    print("测试 chat_only 函数 (多模态)...")
+    dummy_image_b64_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    test_history_multi = [
+        {'role': 'user', 'parts': [{'text': '你好，这是一张图片。'}]},
+        {'role': 'model', 'parts': [{'text': '好的，请描述您希望我做什么。'}]}
+    ]
+    if settings.openai_api_key:
+        print("\n--- 测试 OpenAI (多模态) ---")
+        result_openai_txt = chat_only("你好，OpenAI吗?", history=None, provider=ModelProvider.OPENAI, model_id="gpt-4o")
+        print(f"OpenAI Text Only: {result_openai_txt}")
     if settings.gemini_api_key:
-        print("\n--- 测试 Gemini ---")
-        test_history_gemini = [
-            {'role': 'user', 'parts': [{'text': '你好'}]},
-            {'role': 'model', 'parts': [{'text': '你好！有什么可以帮你的吗？'}]}
-        ]
-        test_prompt_gemini = "请用一句话解释什么是Python？"
-        result_gemini = chat_only(test_prompt_gemini, history=test_history_gemini)
-        print(f"Prompt: {test_prompt_gemini}")
-        print(f"History Len: {len(test_history_gemini)}")
-        print(f"Result (Gemini): {result_gemini}")
-    else:
-        print("\n--- Gemini API Key 未配置，跳过测试 ---")
-
-    # --- Test OpenAI ---
-    # if settings.openai_api_key:
-    #     print("\n--- 测试 OpenAI ---")
-    #     test_history_openai = [
-    #         {'role': 'user', 'content': 'Hello'}, # OpenAI format
-    #         {'role': 'assistant', 'content': 'Hi there! How can I help?'}
-    #     ]
-    #     test_prompt_openai = "In one sentence, what is Python?"
-    #     result_openai = chat_only(test_prompt_openai, history=test_history_openai) # Need mapping inside _chat_openai
-    #     print(f"Prompt: {test_prompt_openai}")
-    #     print(f"History Len: {len(test_history_openai)}")
-    #     print(f"Result (OpenAI): {result_openai}")
-    # else:
-    #      print("\n--- OpenAI API Key 未配置，跳过测试 ---")
+        print("\n--- 测试 Gemini (多模态) ---")
+        result_gemini_txt = chat_only("你好，Gemini吗?", history=None, provider=ModelProvider.GEMINI, model_id="gemini-1.5-flash-latest") # 使用最新的 flash
+        print(f"Gemini Text Only: {result_gemini_txt}")
