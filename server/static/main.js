@@ -449,6 +449,72 @@ function handleAiResponseMessage(data, isStreamEndOrFullMessage = false) {
 
 // --- Global Variables & State ---
 
+// --- 新增：主题切换相关函数 ---
+
+/**
+ * 应用指定的主题到页面。
+ * @param {string} themeName - 要应用的主题名称 ('light' 或 'dark').
+ */
+function applyTheme(themeName) {
+    document.body.classList.remove('theme-light', 'theme-dark'); // 先移除所有主题类
+
+    if (themeName === 'dark') {
+        document.body.classList.add('theme-dark');
+    } else {
+        document.body.classList.add('theme-light'); // 默认或明确指定亮色
+    }
+    
+    // 将选择的主题保存到 localStorage
+    try {
+        localStorage.setItem(THEME_STORAGE_KEY, themeName);
+    } catch (e) {
+        console.warn("无法访问 localStorage:", e);
+    }
+
+    // 更新主题选择下拉菜单的显示值，确保它与当前应用的主题一致
+    const themeSelector = document.getElementById('theme-selector');
+    if (themeSelector && themeSelector.value !== themeName) {
+        themeSelector.value = themeName;
+    }
+    console.log(`主题已应用: ${themeName}`);
+}
+
+/**
+ * 页面加载时加载并应用保存的主题，或应用默认主题。
+ */
+function loadAndApplyInitialTheme() {
+    let savedTheme = null;
+    try {
+        savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+    } catch (e) {
+        console.warn("无法从 localStorage 读取主题:", e);
+    }
+    
+    const themeSelector = document.getElementById('theme-selector');
+
+    if (savedTheme && (savedTheme === 'light' || savedTheme === 'dark')) {
+        applyTheme(savedTheme);
+        // themeSelector.value 会在 applyTheme 中设置
+    } else {
+        // 如果没有保存的主题，或者保存的值无效，则应用默认主题（例如 'light'）
+        // 未来，"跟随系统"的逻辑会在这里扩展
+        applyTheme('light'); // 默认应用亮色主题
+    }
+}
+
+/**
+ * 初始化主题选择器的事件监听和初始主题加载。
+ */
+function initThemeSelector() {
+    const themeSelector = document.getElementById('theme-selector');
+    if (themeSelector) {
+        themeSelector.addEventListener('change', (event) => {
+            applyTheme(event.target.value);
+        });
+    }
+    // 在所有UI元素都可能已加载后应用初始主题
+    loadAndApplyInitialTheme();
+}
 
 function initSocketIO() {
     socket = io({
@@ -1916,25 +1982,49 @@ function saveCurrentChatSessionId() {
 function initAllFeatures() {
     console.log("--- Initializing All Features ---");
     const tokenMeta = document.querySelector('meta[name="token"]');
-    if (tokenMeta?.content) TOKEN = tokenMeta.content;
-    else console.warn('Token meta tag missing.');
+    if (tokenMeta?.content) {
+        TOKEN = tokenMeta.content; // 赋值给全局或模块级 TOKEN 变量
+        console.log("Token loaded from meta tag.");
+    } else {
+        console.warn('Token meta tag missing or empty. Some features might not work.');
+        // 如果 TOKEN 对后续初始化至关重要，您可能需要在这里提前返回或采取其他措施
+    }
 
     initMarkdownRenderer();
-    initSidebarToggle(); // <--- 在这里调用侧边栏切换的初始化
+    initSidebarToggle();
+    
+    initThemeSelector(); // <<< 新增：调用主题初始化函数
 
-    getApiInfo(); // 调用 getApiInfo 来通过 fetch 获取信息
+    // 关于 API 信息和模型列表的获取:
+    // 如果您已经将模型列表获取逻辑整合到了 fetchInitialModelsInfo() 中，
+    // 并且该函数会在 SocketIO 连接成功后被调用 (通过 initSocketIO -> socket.on('connect')),
+    // 那么您可能不需要在这里再次调用 getApiInfo() 或 fetchInitialModelsInfo()。
+    // 如果 getApiInfo() 只是获取 provider 名称，并且您仍需要它，可以保留。
+    // 关键是确保模型选择器和主题选择器都能在合适的时机被正确初始化和填充。
+    // 我将假设 fetchInitialModelsInfo (或类似的函数) 会在 socket 连接后处理模型列表的加载。
+    // getApiInfo(); // 如果这个函数只是获取旧的 provider 信息，可以考虑与模型列表获取合并或调整。
 
-    // KaTeX JS 和 CSS 已经通过 import 导入，renderMathInElement 函数现在可以直接使用。
-    // 我们可以在这里渲染页面加载时已经存在的任何包含 LaTeX 的内容。
-    // console.log('[KaTeX] renderMathInElement is available via import. Rendering existing content.'); // 可选的调试日志
-    document.querySelectorAll('.message-content').forEach(renderLatexInElement);
+    // KaTeX 渲染页面上已有的内容
+    // 确保 renderLatexInElement 函数已正确导入或定义
+    if (typeof renderLatexInElement === 'function') {
+        document.querySelectorAll('.message-content').forEach(element => {
+            try {
+                renderLatexInElement(element);
+            } catch (e) {
+                console.error("Error rendering KaTeX for existing element:", e, element);
+            }
+        });
+    } else {
+        console.warn("renderLatexInElement function is not available. KaTeX rendering for existing content skipped.");
+    }
 
     initBaseButtonHandlers();
     initTabs();
     initScreenshotAnalysisHandlers();
     initAiChatHandlers();
     initVoiceAnswerHandlers();
-    initSocketIO();
+    
+    initSocketIO(); // Socket.IO 的初始化通常会包含连接成功后获取初始数据的逻辑
 
     console.log("--- Application initialization complete ---");
 }
