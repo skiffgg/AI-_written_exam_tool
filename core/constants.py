@@ -36,7 +36,7 @@ _AVAILABLE_OPENAI_MODELS = collections.OrderedDict([
 _AVAILABLE_GEMINI_MODELS = collections.OrderedDict([
     ("gemini-2.5-pro-preview-05-06", "Gemini 2.5 Pro (实验版)"),
     ("gemini-2.5-flash-preview-04-17", "Gemini 2.5 Flash (实验版)"),
-    ("gemini-2.0-flash-spark", "Gemini 2.0 Flash Spark (增强多模态)"),
+    ("gemini-2.0-flash", "Gemini 2.0 Flash Spark (增强多模态)"),
     ("gemini-1.5-pro", "Gemini 1.5 Pro (强大)"),
     ("gemini-1.5-flash", "Gemini 1.5 Flash (快速)"),
     ("gemini-1.0-pro", "Gemini 1.0 Pro (均衡)")

@@ -7,8 +7,6 @@
 
 // --- Global Variables & State ---
 
-
-
 import renderMathInElement from 'katex/contrib/auto-render'
 import 'katex/dist/katex.min.css';
 import MarkdownIt from 'markdown-it';
@@ -25,6 +23,7 @@ let dragStartX, dragStartY;
 let dragType = '';
 let currentImage = null; // URL of image in overlay
 let socket = null;
+let latexConversionHappened = false;
 let uploadedFile = null; // File staged for chat upload
 let mediaRecorder; // For voice recording
 let audioChunks = []; // Store audio data chunks
@@ -35,869 +34,718 @@ let selectedModel = {     // To store the currently selected model
     provider: null,       // e.g., "openai"
     model_id: null        // e.g., "gpt-4o"
 };
-
+var currentVoiceRequestId = null; // Used by voice recording
 let md = null; // Markdown-it instance
+
+
 const THEME_STORAGE_KEY = 'selectedAppTheme'; // 您可以选择一个合适的键名
 const MODEL_SELECTOR_STORAGE_KEY_PROVIDER = 'selectedProvider';
 const MODEL_SELECTOR_STORAGE_KEY_MODEL_ID = 'selectedModelId';
+const ACTIVE_MAIN_FEATURE_TAB_KEY = 'activeMainFeature'; // Changed from ...TAB
+const SIDEBAR_COLLAPSED_KEY = 'sidebarCollapsed';
+
 
 // --- Utility Functions ---
+
+// 打印调试信息
 function debugLog(message) {
-    console.log(`[AI DEBUG] ${message}`);
+  console.log(`[AI DEBUG] ${message}`);
 }
 
-// --- File Upload Handling ---
+// 格式化文件大小
+function formatFileSize(bytes) {
+  if (bytes === undefined || bytes === null || bytes < 0) return 'N/A';
+  if (bytes === 0) return '0 B';
+
+  const k = 1024;
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// 滚动聊天记录到最底部
+function scrollToChatBottom(chatHistoryEl) {
+  if (chatHistoryEl) {
+    requestAnimationFrame(() => {
+      chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
+    });
+  }
+}
+
+// 转义 HTML 特殊字符
+function escapeHtml(text) {
+  if (typeof text !== 'string') return '';
+  
+  const map = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  };
+
+  return text.replace(/[&<>"']/g, function(m) {
+    return map[m];
+  });
+}
+
+// 生成 UUID
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+// 移除正在思考的指示器
+function removeThinkingIndicator(chatHistoryEl, aiThinkingDiv) {
+  if (aiThinkingDiv && aiThinkingDiv.parentNode) {
+    try {
+      aiThinkingDiv.parentNode.removeChild(aiThinkingDiv);
+    } catch (e) {
+      console.warn("Failed to remove thinking indicator:", e);
+      try {
+        aiThinkingDiv.remove();
+      } catch (e2) {}
+    }
+  }
+}
 
 
-// --- **** NEW: Preprocessing Function **** ---
+
+
+// --- Utility Functions ---
+
 /**
- * 预处理 AI 消息文本，将非标准的 LaTeX 分隔符统一为 $ 和 $$
- * @param {string} text 原始消息文本
- * @returns {string} 处理后的文本
+ * Creates a delete button for the history list.
+ * @param {Function} onClickCallback - The callback function to call when the button is clicked.
+ * @returns {HTMLButtonElement} The delete button element.
+ */
+function createDeleteButton(onClickCallback) {
+    const btn = document.createElement('button');
+    btn.className = 'delete-history btn btn-xs btn-outline-danger py-0 px-1 ms-auto';
+    btn.innerHTML = '<i class="fas fa-times small"></i>';
+    btn.title = '删除此条记录';
+    btn.type = 'button';
+    btn.addEventListener('click', (e) => { e.stopPropagation(); onClickCallback(); });
+    return btn;
+}
+
+// --- Text Preprocessing ---
+
+/**
+ * Preprocesses the input text for rendering (such as converting LaTeX).
+ * @param {string} text - The text to preprocess.
+ * @returns {string} The preprocessed text.
  */
 function preprocessTextForRendering(text) {
     if (!text) return "";
-    let processedText = String(text); // 确保输入是字符串
+
+    let processedText = String(text);
     let latexConversionHappened = false;
 
-    // --- 原 preprocessLatexSeparators 的逻辑 ---
-    // 1. 替换块级公式分隔符 \[ ... \] 为 $$ ... $$
+    // Convert LaTeX expressions
     processedText = processedText.replace(/\\\[([\s\S]*?)\\\]/g, (match, group1) => {
         latexConversionHappened = true;
         return '$$' + group1.trim() + '$$';
     });
 
-    // 2. 替换行内公式分隔符 \( ... \) 为 $ ... $
     processedText = processedText.replace(/\\\(([\s\S]*?)\\\)/g, (match, group1) => {
         latexConversionHappened = true;
         return '$' + group1.trim() + '$';
     });
 
-    if (latexConversionHappened) {
-        // 注意：如果你还想保留这个特定的日志，可以这样做。
-        // 或者，如果主要目的是看转换是否发生，这个标志本身可能就足够了，不一定每次都打印日志。
-        console.log("[Preprocess] LaTeX separators were converted by preprocessTextForRendering.");
-    }
-
-    // --- 原 preprocessSpecialCharacters 的逻辑 ---
-    // 将弯单引号 (apostrophe/prime, U+2019) 替换为直单引号 (apostrophe, U+0027)
+    // Fix apostrophe characters
     processedText = processedText.replace(/’/g, "'");
 
-    // 你可以在这里按需添加其他特殊字符的替换规则
-    // 例如，更通用的弯双引号替换:
-    // processedText = processedText.replace(/[“”]/g, '"'); 
-    // 或者针对 LaTeX 文本模式的引号 (如果 typographer 未正确处理):
-    // processedText = processedText.replace(/“/g, "``");
-    // processedText = processedText.replace(/”/g, "''");
-
+    if (latexConversionHappened) {
+        console.log("[Preprocess] LaTeX separators converted.");
+    }
     return processedText;
 }
 
-async function fetchAndPopulateModels() {
-    const modelSelectorEl = document.getElementById('model-selector');
-    const apiProviderDisplayEl = document.getElementById('api-provider-display');
+// --- KaTeX and Markdown Rendering ---
 
-    if (!modelSelectorEl || !apiProviderDisplayEl) {
-        console.error("Model selector or API provider display element not found in the DOM.");
-        if (modelSelectorEl) modelSelectorEl.innerHTML = '<option value="">Error: UI Missing</option>';
-        if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: UI错误';
-        return;
-    }
-
-    modelSelectorEl.innerHTML = '<option value="">正在加载模型...</option>';
-    apiProviderDisplayEl.textContent = 'AI模型: 加载中...';
-    apiProviderDisplayEl.title = '正在从服务器获取可用模型列表';
-
-    try {
-        const response = await fetch('/api/available_models', {
-            headers: {
-                // Assuming TOKEN is a global variable holding your auth token
-                ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` })
-            }
-        });
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`获取模型列表失败: ${response.status} ${response.statusText}. ${errorText}`);
-        }
-        availableModels = await response.json(); // Expected: { "openai": {"gpt-4o": "OpenAI GPT-4o"}, ... }
-        
-        if (Object.keys(availableModels).length === 0) {
-            modelSelectorEl.innerHTML = '<option value="">无可用模型</option>';
-            apiProviderDisplayEl.textContent = 'AI模型: 无可用';
-            console.warn("No available models received from the backend.");
-            return;
-        }
-        
-        console.log("Available models loaded:", availableModels);
-        modelSelectorEl.innerHTML = ''; // Clear "loading" message
-
-        const lastSelectedProvider = localStorage.getItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER);
-        const lastSelectedModelId = localStorage.getItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID);
-        let isLastSelectedModelStillAvailable = false;
-
-        for (const providerKey in availableModels) {
-            if (Object.prototype.hasOwnProperty.call(availableModels, providerKey)) {
-                const providerModels = availableModels[providerKey];
-                if (Object.keys(providerModels).length === 0) continue; // Skip empty providers
-
-                const optgroup = document.createElement('optgroup');
-                // Attempt to create a friendlier display name for the provider
-                let providerDisplayName = providerKey.charAt(0).toUpperCase() + providerKey.slice(1);
-                if (providerKey.toLowerCase() === "openai") providerDisplayName = "OpenAI";
-                else if (providerKey.toLowerCase() === "gemini") providerDisplayName = "Google Gemini";
-                else if (providerKey.toLowerCase() === "claude") providerDisplayName = "Anthropic Claude";
-                else if (providerKey.toLowerCase() === "grok") providerDisplayName = "xAI Grok";
-                optgroup.label = providerDisplayName;
-
-                for (const modelId in providerModels) {
-                    if (Object.prototype.hasOwnProperty.call(providerModels, modelId)) {
-                        const modelDisplayName = providerModels[modelId];
-                        const option = document.createElement('option');
-                        // Store provider and model_id in a single value for simplicity,
-                        // or use dataset attributes as you prefer.
-                        option.value = `${providerKey}:${modelId}`;
-                        option.textContent = modelDisplayName;
-                        // Store in dataset for easier access on change
-                        option.dataset.provider = providerKey;
-                        option.dataset.modelId = modelId;
-
-                        if (providerKey === lastSelectedProvider && modelId === lastSelectedModelId) {
-                            option.selected = true;
-                            isLastSelectedModelStillAvailable = true;
-                        }
-                        optgroup.appendChild(option);
+/**
+ * Initializes the Markdown renderer with KaTeX and highlights code blocks.
+ */
+function initMarkdownRenderer() {
+    if (typeof MarkdownIt === 'function' && typeof hljs !== 'undefined') {
+        md = new MarkdownIt({
+            html: true,
+            breaks: true,
+            langPrefix: 'language-',
+            linkify: true,
+            typographer: false,
+            quotes: '“”‘’',
+            highlight: function (str, lang) {
+                if (lang && hljs.getLanguage(lang)) {
+                    try {
+                        return '<pre class="hljs"><code>' + hljs.highlight(str, { language: lang, ignoreIllegals: true }).value + '</code></pre>';
+                    } catch (e) {
+                        console.error("[HLJS] Error:", e);
                     }
                 }
-                modelSelectorEl.appendChild(optgroup);
+                return '<pre class="hljs"><code>' + escapeHtml(str) + '</code></pre>';
             }
+        });
+        console.log("[MD RENDERER] markdown-it initialized.");
+    } else {
+        console.error("[MD RENDERER] MarkdownIt or hljs not available. Using basic fallback.");
+        md = { render: (text) => escapeHtml(String(text)).replace(/\n/g, '<br>') };
+    }
+}
+
+function loadChatSessionsFromStorage() {
+    try {
+        const saved = localStorage.getItem('chatSessions');
+        if (saved) {
+            chatSessions = JSON.parse(saved);
+            const listEl = document.getElementById('chat-session-list');
+            if (listEl) { 
+                listEl.innerHTML = ''; 
+                chatSessions.sort((a,b)=>(b.id||0)-(a.id||0)).forEach(addChatHistoryItem); 
+            }
+            const lastSessionId = localStorage.getItem('currentChatSessionId');
+            if (lastSessionId && chatSessions.find(s => s.id === Number(lastSessionId))) {
+                currentChatSessionId = Number(lastSessionId);
+                const activeSessionItem = listEl?.querySelector(`[data-session-id="${currentChatSessionId}"]`);
+                if (activeSessionItem) activeSessionItem.click();
+                else clearCurrentChatDisplay();
+            } else { 
+                clearCurrentChatDisplay(); 
+            }
+        } else { 
+            clearCurrentChatDisplay(); 
         }
-
-        if (modelSelectorEl.options.length === 0) {
-            modelSelectorEl.innerHTML = '<option value="">无可用模型</option>';
-            apiProviderDisplayEl.textContent = 'AI模型: 无可用';
-            selectedModel.provider = null;
-            selectedModel.model_id = null;
-        } else if (isLastSelectedModelStillAvailable) {
-            // Trigger change to set selectedModel and update display for the stored selection
-            handleModelSelectionChange({ target: modelSelectorEl });
-        } else {
-            // If no stored selection or stored selection is no longer available, select the first option
-            modelSelectorEl.selectedIndex = 0;
-            handleModelSelectionChange({ target: modelSelectorEl });
-        }
-
-        modelSelectorEl.addEventListener('change', handleModelSelectionChange);
-
-    } catch (error) {
-        console.error("Error fetching or populating models:", error);
-        modelSelectorEl.innerHTML = '<option value="">加载模型失败</option>';
-        apiProviderDisplayEl.textContent = 'AI模型: 加载失败';
-        apiProviderDisplayEl.title = `错误: ${error.message}`;
+    } catch (e) { 
+        console.error("Failed to load chat sessions:", e); 
+        chatSessions=[]; 
+        clearCurrentChatDisplay(); 
     }
 }
 
 /**
- * Handles the change event of the model selector.
- * Updates the global selectedModel object and the UI display.
+ * Processes AI message by rendering markdown, LaTeX, and inserting proper elements into the DOM.
+ * @param {HTMLElement} messageElement - The element where the message will be rendered.
+ * @param {string} messageText - The message text to render.
+ * @param {string} sourceEvent - The source event triggering the message (optional).
  */
-function handleModelSelectionChange(event) {
-    const selector = event.target;
-    const selectedOption = selector.options[selector.selectedIndex];
-
-    if (selectedOption && selectedOption.dataset.provider && selectedOption.dataset.modelId) {
-        selectedModel.provider = selectedOption.dataset.provider;
-        selectedModel.model_id = selectedOption.dataset.modelId;
-
-        localStorage.setItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER, selectedModel.provider);
-        localStorage.setItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID, selectedModel.model_id);
-
-        const apiProviderDisplayEl = document.getElementById('api-provider-display');
-        if (apiProviderDisplayEl) {
-            const modelDisplayName = selectedOption.textContent;
-            // Get provider display name from optgroup label
-            const providerDisplayName = selectedOption.parentElement.label || selectedModel.provider.toUpperCase();
-            apiProviderDisplayEl.textContent = `AI模型: ${modelDisplayName}`;
-            apiProviderDisplayEl.title = `当前模型: ${modelDisplayName} (来自 ${providerDisplayName})`;
-        }
-        console.log("Model selected:", JSON.stringify(selectedModel));
-        
-        // Optional: You could emit an event to the server if it needs to know about the change immediately
-        // if (socket && socket.connected) {
-        // socket.emit('ui_model_changed', { provider: selectedModel.provider, model_id: selectedModel.model_id });
-        // }
-    } else {
-        // Handle empty or invalid selection if necessary
-        selectedModel.provider = null;
-        selectedModel.model_id = null;
-        const apiProviderDisplayEl = document.getElementById('api-provider-display');
-        if (apiProviderDisplayEl) {
-            apiProviderDisplayEl.textContent = 'AI模型: 请选择';
-            apiProviderDisplayEl.title = '请从下拉列表中选择一个AI模型';
-        }
-        console.warn("Invalid model selection or no model selected.");
-    }
-}
-
-
-// --- Modify initAllFeatures to call fetchAndPopulateModels ---
-// function initAllFeatures() {
-//     console.log("--- Initializing All Features ---");
-//     const tokenMeta = document.querySelector('meta[name="token"]');
-//     if (tokenMeta?.content) {
-//         TOKEN = tokenMeta.content;
-//         console.log("Token loaded from meta tag:", TOKEN ? "Present" : "Empty/Not Present");
-//     } else {
-//         console.warn('Token meta tag missing or empty. Some features might not work.');
-//     }
-
-//     initMarkdownRenderer(); // Assuming this is defined elsewhere in your file
-//     initSidebarToggle();    // Assuming defined
-//     initThemeSelector();    // Assuming defined
-
-//     // *** NEW: Fetch and populate models ***
-//     fetchAndPopulateModels(); // Call the new function
-
-//     // ... (KaTeX, BaseButtonHandlers, Tabs, Screenshot, AI Chat, Voice handlers init) ...
-//     if (typeof renderLatexInElement === 'function') { /* ... */ } // Assuming defined
-//     initBaseButtonHandlers();       // Assuming defined
-//     initTabs();                     // Assuming defined
-//     initScreenshotAnalysisHandlers(); // Assuming defined
-//     initAiChatHandlers();           // Assuming defined
-//     initVoiceAnswerHandlers();      // Assuming defined
-    
-//     initSocketIO(); // Socket.IO initialization
-
-//     console.log("--- Application initialization complete ---");
-// }
-
-// --- Modify functions that send data to the backend ---
-
-// Example: Modify sendChatMessage
-// function sendChatMessage() {
-//     const chatInputEl = document.getElementById('chat-chat-input');
-//     const chatHistoryEl = document.getElementById('chat-chat-history');
-
-//     if (!socket || !socket.connected) {
-//         console.error('[Chat] Socket not connected.');
-//         // Consider adding a user-facing error message here
-//         if(chatHistoryEl) {
-//             const errDiv = document.createElement('div');
-//             errDiv.className = 'system-message error-text'; // Add error-text for styling
-//             errDiv.textContent = '错误：无法连接到服务器，请检查网络连接。';
-//             chatHistoryEl.appendChild(errDiv);
-//             scrollToChatBottom(chatHistoryEl);
-//         }
-//         return;
-//     }
-//     if (!chatInputEl || !chatHistoryEl) { console.error("Chat input or history element missing."); return; }
-
-//     const message = chatInputEl.value.trim();
-//     const currentFileToSend = uploadedFile; // From global scope, handled by handleFileUpload
-//     let imageBase64Data = null; // Placeholder for directly pasted/embedded image in chat
-
-//     // TODO: Implement logic here if you allow pasting images directly into chatInputEl
-//     // For now, we'll assume imageBase64Data is null unless explicitly set by such a mechanism.
-//     // If you have an image preview for a pasted image, get its base64 data.
-//     // Example:
-//     // const pastedImagePreview = document.getElementById('pasted-image-preview-in-chat');
-//     // if (pastedImagePreview && pastedImagePreview.src && pastedImagePreview.src.startsWith('data:image')) {
-//     // imageBase64Data = pastedImagePreview.src.split(',')[1];
-//     // }
-
-
-//     if (!message && !currentFileToSend && !imageBase64Data) {
-//         debugLog("Empty message, no file selected, and no pasted image.");
-//         return;
-//     }
-//     if (!selectedModel.provider || !selectedModel.model_id) {
-//         console.warn("No model selected. Please choose a model from the dropdown.");
-//         // Optionally, display a message to the user
-//         if(chatHistoryEl) {
-//             const errDiv = document.createElement('div');
-//             errDiv.className = 'system-message error-text';
-//             errDiv.textContent = '请先从顶部选择一个AI模型。';
-//             chatHistoryEl.appendChild(errDiv);
-//             scrollToChatBottom(chatHistoryEl);
-//         }
-//         return;
-//     }
-
-//     // (Your existing session management logic - unchanged)
-//     let activeSession = currentChatSessionId ? chatSessions.find(s => s.id === currentChatSessionId) : null;
-//     if (!activeSession) {
-//         const newId = Date.now();
-//         let title = message.substring(0, 30) || 
-//                     (imageBase64Data ? "含图片的对话" : null) || 
-//                     (currentFileToSend ? `含${currentFileToSend.name.substring(0, 20)}的对话` : '新对话');
-//         if ((message.length > 30 && title.length ===30) || (currentFileToSend && currentFileToSend.name.length > 20 && title.length >= 22)) title += "...";
-//         activeSession = { id: newId, title: escapeHtml(title), history: [] };
-//         chatSessions.unshift(activeSession);
-//         addChatHistoryItem(activeSession);
-//         currentChatSessionId = newId;
-//         saveCurrentChatSessionId();
-//         setTimeout(() => {
-//             const l = document.getElementById('chat-session-list');
-//             l?.querySelectorAll('.active-session').forEach(i => i.classList.remove('active-session'));
-//             l?.querySelector(`[data-session-id="${activeSession.id}"]`)?.classList.add('active-session');
-//             if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
-//         }, 0);
-//     }
-//     // (Add user message to UI and history - largely unchanged, but account for image)
-//     const userMessageText = message || 
-//                             (imageBase64Data ? "[图片已包含在消息中]" : null) || 
-//                             (currentFileToSend ? `[用户上传了文件: ${currentFileToSend.name}]` : "");
-//     if (activeSession && (userMessageText || currentFileToSend || imageBase64Data)) {
-//          activeSession.history.push({ role: 'user', parts: [{ text: userMessageText }] });
-//          // If imageBase64Data exists, your history format might need to store it too,
-//          // or the backend reconstructs it. For now, just text part for user history.
-//     }
-//     // (Display user message in UI - your existing logic)
-//     const uDiv = document.createElement('div'); uDiv.className = 'user-message';
-//     const uStrong = document.createElement('strong'); uStrong.textContent = "您: "; uDiv.appendChild(uStrong);
-//     const uMsgContentDiv = document.createElement('div'); uMsgContentDiv.className = 'message-content';
-//     uMsgContentDiv.textContent = message; // Only display text prompt here
-//     // Display pasted image preview if any (this is a simple text, actual image rendering is complex)
-//     if (imageBase64Data && !currentFileToSend) { // Don't show if it's part of a file upload
-//         const imgInfo = document.createElement('div'); imgInfo.className = 'attached-file';
-//         imgInfo.innerHTML = `<i class="fas fa-image"></i> [已粘贴图片]`;
-//         if (message) uMsgContentDiv.appendChild(document.createElement('br'));
-//         uMsgContentDiv.appendChild(imgInfo);
-//     }
-//     if (currentFileToSend) { // File upload preview
-//         const fD = document.createElement('div'); fD.className = 'attached-file';
-//         fD.innerHTML = `<i class="fas fa-paperclip"></i> ${escapeHtml(currentFileToSend.name)} (${formatFileSize(currentFileToSend.size)})`;
-//         if (message || imageBase64Data) uMsgContentDiv.appendChild(document.createElement('br'));
-//         uMsgContentDiv.appendChild(fD);
-//     }
-//     uDiv.appendChild(uMsgContentDiv);
-//     if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
-//     chatHistoryEl.appendChild(uDiv);
-
-
-//     const reqId = generateUUID();
-//     const thinkingDiv = document.createElement('div'); /* ... (your thinking indicator logic) ... */
-//     thinkingDiv.className = 'ai-message ai-thinking';
-//     thinkingDiv.dataset.requestId = reqId;
-//     thinkingDiv.innerHTML = `<i class="fas fa-spinner fa-spin"></i> AI (${selectedModel.provider}/${selectedModel.model_id}) 正在思考...`;
-//     chatHistoryEl.appendChild(thinkingDiv);
-//     scrollToChatBottom(chatHistoryEl);
-
-//     if (activeSession) {
-//          activeSession.history.push({ 
-//              role: 'model', 
-//              parts: [{ text: '' }], 
-//              temp_id: reqId, 
-//              provider: selectedModel.provider, // Store which model was used for this turn
-//              model_id: selectedModel.model_id
-//             });
-//     }
-
-//     const streamToggle = document.getElementById('streaming-toggle-checkbox');
-//     const stream = streamToggle ? streamToggle.checked : true;
-//     let histToSend = activeSession ? JSON.parse(JSON.stringify(activeSession.history.slice(0, -1))) : [];
-
-//     if (currentFileToSend) { // File upload takes precedence over pasted image for this route
-//         const fd = new FormData();
-//         fd.append('prompt', message);
-//         fd.append('file', currentFileToSend, currentFileToSend.name);
-//         fd.append('history', JSON.stringify(histToSend));
-//         fd.append('session_id', activeSession.id);
-//         fd.append('request_id', reqId);
-//         // Add selected model info to the form data for /chat_with_file
-//         fd.append('provider', selectedModel.provider);
-//         fd.append('model_id', selectedModel.model_id);
-//         // use_streaming might not be directly applicable for HTTP file upload's immediate response
-//         // but backend can use it if it decides to stream a subsequent SocketIO message
-
-//         fetch('/chat_with_file', { method: 'POST', headers: { ...(TOKEN && {'Authorization': `Bearer ${TOKEN}`})}, body: fd })
-//             .then(r => { /* ... (your existing fetch response handling) ... */ 
-//                 if (!r.ok) {
-//                     return r.json().catch(() => ({ error: `HTTP Error: ${r.status} ${r.statusText}` }))
-//                                .then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
-//                 }
-//                 return r.json();
-//             })
-//             .then(d => {
-//                 if (d && d.request_id === reqId && d.status === 'processing') {
-//                     console.log(`[File Upload Chat] Request ${reqId} accepted. Waiting for Socket.IO. Model: ${selectedModel.provider}/${selectedModel.model_id}`);
-//                 } else { /* ... error handling ... */ }
-//             })
-//             .catch(e => { /* ... (your existing fetch error handling) ... */ 
-//                 console.error('Chat w/ file fetch error:', e);
-//                 const currentThinkingDivError = chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
-//                 if (currentThinkingDivError) removeThinkingIndicator(chatHistoryEl, currentThinkingDivError);
-//                 // ... (display error in chat)
-//             });
-//     } else { // No file upload, potentially a multimodal chat message (text + pasted image)
-//         socket.emit('chat_message', {
-//             prompt: message,
-//             history: histToSend,
-//             request_id: reqId,
-//             use_streaming: stream,
-//             session_id: activeSession.id,
-//             provider: selectedModel.provider,   // Pass selected provider
-//             model_id: selectedModel.model_id,     // Pass selected model ID
-//             image_data: imageBase64Data     // Pass base64 image data if available
-//         });
-//     }
-    
-//     if(activeSession) saveChatSessionsToStorage(); // Assuming defined
-
-//     // Clear inputs
-//     chatInputEl.value = '';
-//     const upPrevEl = document.getElementById('chat-upload-preview'); if (upPrevEl) upPrevEl.innerHTML = ''; uploadedFile = null;
-//     const fInEl = document.getElementById('chat-file-upload'); if (fInEl) fInEl.value = '';
-//     // TODO: Clear any pasted image preview from chat input area
-//     // Example:
-//     // const pastedImagePreview = document.getElementById('pasted-image-preview-in-chat');
-//     // if (pastedImagePreview) pastedImagePreview.src = ''; // or remove the element
-// }
-
-// Modify other functions that make backend calls (e.g., confirmCrop, requestScreenshot related calls)
-// to also include selectedModel.provider and selectedModel.model_id if the backend
-// routes for those actions are updated to accept and use them.
-
-// Example for confirmCrop (if /crop_image will use selected model for re-analysis)
-function confirmCrop() {
-    if (!currentImage) { alert('错误：没有当前图片。'); return; }
-    const overlayImageEl = document.getElementById('overlay-image');
-    if (!overlayImageEl || !overlayImageEl.naturalWidth) { alert('错误：图片未加载。'); return; }
-    const scaleX = overlayImageEl.naturalWidth / overlayImageEl.width;
-    const scaleY = overlayImageEl.naturalHeight / overlayImageEl.height;
-    const oSel = { 
-        x: Math.round(selection.x * scaleX), y: Math.round(selection.y * scaleY), 
-        width: Math.round(selection.width * scaleX), height: Math.round(selection.height * scaleY) 
-    };
-
-    const fd = new FormData();
-    fd.append('image_url', currentImage); // original image URL
-    fd.append('x', oSel.x); fd.append('y', oSel.y);
-    fd.append('width', oSel.width); fd.append('height', oSel.height);
-    
-    const prmptEl = document.getElementById('prompt-input');
-    if (prmptEl?.value.trim()) fd.append('prompt', prmptEl.value.trim());
-
-    // Add selected model information
-    if (selectedModel.provider && selectedModel.model_id) {
-        fd.append('provider', selectedModel.provider);
-        fd.append('model_id', selectedModel.model_id);
-    } else {
-        console.warn("Confirm Crop: No model selected, backend will use default for analysis.");
-    }
-
-    const analysisEl = document.getElementById('ss-ai-analysis');
-    if (analysisEl) analysisEl.innerHTML = `<i class="fas fa-spinner fa-spin"></i> 分析裁剪区域 (模型: ${selectedModel.provider || '默认'}/${selectedModel.model_id || '默认'})...`;
-    hideImageOverlay(); // Assuming defined
-
-    fetch('/crop_image', { method: 'POST', headers: { ...(TOKEN && {'Authorization': `Bearer ${TOKEN}`}) }, body: fd })
-    .then(r => {
-        if (!r.ok) return r.json().catch(() => ({error: `HTTP ${r.status}`})).then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
-        return r.json();
-    })
-    .then(d => {
-        debugLog(`Crop and re-analysis request acknowledged: ${JSON.stringify(d)}`);
-        // Analysis result will come via SocketIO event 'analysis_result' or 'new_screenshot'
-    })
-    .catch(e => {
-        console.error('Crop image error:', e);
-        alert(`裁剪或分析出错: ${e.message}`);
-        if (analysisEl) analysisEl.textContent = `分析失败: ${e.message}`;
-    });
-}
-
-
-// Modify Socket.IO event handlers to display provider/model if received
-// In processAIMessage(messageElement, messageText, sourceEvent)
-// When creating/updating the AI message div, you can use data from messageElement.dataset
-// (This assumes backend sends provider and model_id in socket events like 'chat_stream_chunk', 'chat_stream_end', 'analysis_result')
-
-/* Example modification within processAIMessage (you'll need to adapt to your exact structure)
 function processAIMessage(messageElement, messageText, sourceEvent = "unknown") {
-    // ... your existing strongTag and contentDiv creation ...
-    let strongTag = messageElement.querySelector('strong');
-    // ...
-    const providerName = messageElement.dataset.provider || 'AI'; // Get from data attribute
-    const modelName = messageElement.dataset.modelId || '';    // Get from data attribute
-    
-    strongTag.textContent = `${providerName}${modelName ? ` (${modelName.split('/').pop()})` : ''}: `; // Display like "OpenAI (gpt-4o): "
-    // ... rest of your markdown and KaTeX rendering ...
-}
-*/
-
-// Make sure initAllFeatures is the last thing called or is wrapped in DOMContentLoaded
-document.addEventListener('DOMContentLoaded', initAllFeatures);
-
-
-function formatFileSize(bytes) {
-    if (bytes < 0) return 'Invalid size';
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.max(0, Math.floor(Math.log(bytes) / Math.log(k)));
-    const fixed = (i === 0) ? 0 : 1;
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(fixed)) + ' ' + sizes[i];
-}
-
-function scrollToChatBottom(chatHistoryEl) {
-    if (chatHistoryEl) {
-        requestAnimationFrame(() => {
-            chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
-        });
+    if (!messageElement) {
+        console.error("processAIMessage: null messageElement. Source:", sourceEvent);
+        return;
     }
-}
 
-function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return String(text).replace(/[&<>"']/g, function(m) { return map[m]; });
-}
-
-function generateUUID(){return'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{var r=Math.random()*16|0,v=c=='x'?r:(r&0x3|0x8);return v.toString(16);});}
-
-function removeThinkingIndicator(chatHistoryEl, aiThinkingDiv) {
-    if (aiThinkingDiv) {
-        console.log("[removeThinkingIndicator] Attempting to remove:", aiThinkingDiv, "from parent:", chatHistoryEl);
-        if (aiThinkingDiv.parentNode === chatHistoryEl) {
-            chatHistoryEl.removeChild(aiThinkingDiv);
-            console.log("[removeThinkingIndicator] Removed successfully (as direct child).");
-        } else if (aiThinkingDiv.parentNode) {
-            aiThinkingDiv.parentNode.removeChild(aiThinkingDiv);
-            console.log("[removeThinkingIndicator] Removed successfully (from its parent).");
-        } else {
-            try { aiThinkingDiv.remove(); console.log("[removeThinkingIndicator] Removed successfully (direct remove).");}
-            catch(e){console.warn("[removeThinkingIndicator] Failed to remove thinking indicator directly:",e);}
-        }
-    } else {
-        // console.log("[removeThinkingIndicator] Called with null aiThinkingDiv or div already removed.");
-    }
-}
-
-// --- File Upload Handling ---
-function handleFileUpload(e) {
-    debugLog("File input changed (handleFileUpload).");
-    const fileInput = e.target;
-    const uploadPreviewEl = document.getElementById('chat-upload-preview');
-    if (!uploadPreviewEl) { console.error("Chat upload preview element (#chat-upload-preview) not found."); return; }
-    uploadPreviewEl.innerHTML = '';
-    uploadedFile = null;
-    if (fileInput.files && fileInput.files.length > 0) {
-        const file = fileInput.files[0];
-        uploadedFile = file;
-        debugLog(`File selected: ${file.name}, Size: ${file.size}`);
-        const previewItem = document.createElement('div');
-        previewItem.className = 'preview-item';
-        const displayName = file.name.length > 40 ? file.name.substring(0, 37) + '...' : file.name;
-        previewItem.innerHTML = `<div class="file-info" title="${escapeHtml(file.name)}"><i class="fas fa-file"></i><span>${escapeHtml(displayName)} (${formatFileSize(file.size)})</span></div><button type="button" class="remove-file" title="取消选择此文件"><i class="fas fa-times"></i></button>`;
-        previewItem.querySelector('.remove-file').onclick = () => {
-            debugLog(`Removing file preview: ${file.name}`);
-            uploadPreviewEl.innerHTML = ''; uploadedFile = null; fileInput.value = '';
-        };
-        uploadPreviewEl.appendChild(previewItem);
-    } else { debugLog("File selection cancelled or no file chosen."); }
-}
-
-// --- LaTeX and Markdown Rendering ---
-// --- LaTeX and Markdown Rendering ---
-function renderLatexInElement(element) {
-    if (!element) return;
-    try {
-        // 直接调用导入的 renderMathInElement (它应该在文件顶部被 import)
-        renderMathInElement(element, { 
-            delimiters: [
-                { left: '$$', right: '$$', display: true },
-                { left: '$', right: '$', display: false },
-                { left: '\\(', right: '\\)', display: false },
-                { left: '\\[', right: '\\]', display: true }
-            ],
-            throwOnError: false,
-            ignoredClasses: ["no-katex-render", "hljs", "no-math", "highlight", "language-"]
-        });
-    } catch (error) {
-        console.error("[KaTeX] Rendering error (通过 import):", error, "on element:", element);
-    }
-}
-
-function initMarkdownRenderer() {
-    console.log("[MD RENDERER] Initializing markdown-it...");
-    try {
-        // 确保 MarkdownIt 已经按照上一步的建议导入和实例化
-        if (typeof MarkdownIt === 'function') { 
-            md = new MarkdownIt({
-                html: true,
-                breaks: true,
-                langPrefix: 'language-',
-                linkify: true,
-                typographer: false,
-                quotes: '“”‘’',
-                highlight: function (str, lang) {
-                    // 使用导入的 hljs
-                    if (lang && hljs && hljs.getLanguage(lang)) { // <--- 修改这里: window.hljs -> hljs
-                        try {
-                            return '<pre class="hljs"><code>' +
-                                   hljs.highlight(str, { language: lang, ignoreIllegals: true }).value + // <--- 修改这里: window.hljs -> hljs
-                                   '</code></pre>';
-                        } catch (e) { console.error("[HLJS] Error highlighting:", e); }
-                    }
-                    // 确保 md.utils.escapeHtml 在 md 实例化前不可用，所以这里用你全局的 escapeHtml
-                    // 或者，如果 md 已经实例化，可以使用 md.utils.escapeHtml(str)
-                    return '<pre class="hljs"><code>' + escapeHtml(str) + '</code></pre>'; 
-                }
-            });
-            console.log("[MD RENDERER] ✅ markdown-it initialized successfully.");
-        } else {
-            throw new Error("Imported MarkdownIt is not a function.");
-        }
-    } catch (e) {
-        console.error("[MD RENDERER] ❌ Failed to initialize markdown-it:", e);
-        md = { 
-            render: function(text) { return escapeHtml(text).replace(/\n/g, '<br>'); },
-            utils: { escapeHtml: escapeHtml }
-        };
-        console.warn("[MD RENDERER] ⚠️ Using basic fallback markdown renderer.");
-    }
-}
-
-function processAIMessage(messageElement, messageText, sourceEvent = "unknown") {
-    let strongTag = messageElement.querySelector('strong');
+    // --- 1. 设置发送者信息 (strongTag) ---
+    let strongTag = messageElement.querySelector('strong.ai-sender-prefix');
     if (!strongTag) {
         strongTag = document.createElement('strong');
-        if (messageElement.firstChild) {
+        strongTag.className = 'ai-sender-prefix me-1';
+        // (插入 strongTag 的逻辑...)
+        if (messageElement.firstChild && messageElement.firstChild.nodeType === Node.ELEMENT_NODE) {
             messageElement.insertBefore(strongTag, messageElement.firstChild);
         } else {
             messageElement.appendChild(strongTag);
         }
     }
     const providerName = messageElement.dataset.provider || 'AI';
-    strongTag.textContent = `${providerName}: `;
+    const modelId = messageElement.dataset.modelId;
+    const modelNameShort = modelId ? ` (${modelId.split(/[-/]/).pop().substring(0, 20)})` : '';
+    strongTag.textContent = `${providerName}${modelNameShort}:`;
 
-    let contentDiv = messageElement.querySelector('.message-content');
+    // --- 2. 获取或创建内容容器 (contentDiv) ---
+    let contentDiv;
     const streamingSpan = messageElement.querySelector('.ai-response-text-streaming');
 
-    if (streamingSpan) {
-        // console.log(`[KaTeX Debug from ${sourceEvent}] Removing streamingSpan for message:`, String(messageText || "").substring(0, 50) + "...");
-        streamingSpan.remove();
-    }
+    // 如果是流式块，并且 streamingSpan 存在，则追加到 streamingSpan
+    if (sourceEvent === "chat_stream_chunk" && streamingSpan) {
+        contentDiv = streamingSpan; // 后续文本将追加到这里
+    } else {
+        // 对于非流式块、流结束，或者 streamingSpan 不存在的情况
+        if (streamingSpan) streamingSpan.remove(); // 移除临时的流式 span
 
-    if (!contentDiv) {
-        contentDiv = document.createElement('div');
-        contentDiv.className = 'message-content';
-        if (strongTag.nextSibling) {
-            messageElement.insertBefore(contentDiv, strongTag.nextSibling);
-        } else {
-            messageElement.appendChild(contentDiv);
+        contentDiv = messageElement.querySelector('.message-content');
+        if (!contentDiv) {
+            contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            if (strongTag.nextSibling) messageElement.insertBefore(contentDiv, strongTag.nextSibling);
+            else messageElement.appendChild(contentDiv);
         }
+        contentDiv.innerHTML = ''; // 清空，为完整渲染做准备
     }
-    contentDiv.innerHTML = ''; // 清空内容，为新的渲染做准备
 
+    // --- 3. 预处理文本 ---
     let textToRender = String(messageText || "");
-    
     if (typeof preprocessTextForRendering === 'function') {
         textToRender = preprocessTextForRendering(textToRender);
-    } else {
-        console.warn("Warning: preprocessTextForRendering function is not defined. Text preprocessing skipped.");
     }
 
+    // --- 4. Markdown 渲染 ---
     if (md && typeof md.render === 'function') {
-        contentDiv.innerHTML = md.render(textToRender);
+        if (sourceEvent === "chat_stream_chunk" && contentDiv.classList.contains('ai-response-text-streaming')) {
+            // 流式传输时，仅追加文本到 streamingSpan
+            contentDiv.textContent += textToRender; // 注意：这里应该是 += data.chunk (原始块)，而不是预处理后的 textToRender
+                                                 // 或者，如果预处理很快，也可以用 textToRender，但要确保只处理当前块
+                                                 // 更好的做法是，流式传输时，由 chat_stream_chunk 事件处理器直接更新 streamingSpan.textContent
+                                                 // processAIMessage 在流式块时不应该被这样调用
+        } else {
+            // 非流式或流结束后，渲染完整的 Markdown
+            contentDiv.innerHTML = md.render(textToRender);
+            console.log(`[ProcessAIMessage from ${sourceEvent}] HTML after md.render:`, contentDiv.innerHTML.substring(0, 200) + "...");
+        }
     } else {
-        if (typeof escapeHtml === 'function') {
+        // Fallback Markdown 渲染
+        if (sourceEvent === "chat_stream_chunk" && contentDiv.classList.contains('ai-response-text-streaming')) {
+            contentDiv.textContent += escapeHtml(textToRender);
+        } else {
             contentDiv.innerHTML = escapeHtml(textToRender).replace(/\n/g, '<br>');
-        } else { // 极端的 fallback
-            console.error("escapeHtml function is not defined! Displaying raw text.");
-            const tempP = document.createElement('p');
-            tempP.textContent = textToRender;
-            contentDiv.appendChild(tempP);
         }
     }
 
-    // --- 添加复制代码按钮的逻辑 START ---
-    const codeBlocks = contentDiv.querySelectorAll('pre > code'); // 更精确地选择 highlight.js 生成的结构
-    codeBlocks.forEach(codeBlock => {
-        const preElement = codeBlock.parentElement; // 获取父元素 <pre>
-        if (preElement) {
-            // 确保 pre 元素是相对定位的 (最好在 CSS 中设置 .message-content pre { position: relative; })
-            // if (getComputedStyle(preElement).position === 'static') {
-            // preElement.style.position = 'relative';
-            // }
-            // 从 style.css 中看到 .message-content pre 已经有 position: relative; 了，所以上面这块可以省略
-
-            // 检查是否已经有复制按钮，防止重复添加 (虽然innerHTML清空了，但以防万一)
-            if (preElement.querySelector('.copy-code-button')) {
-                return; 
-            }
-
-            const copyButton = document.createElement('button');
-            copyButton.className = 'copy-code-button'; // 应用CSS样式
-            copyButton.innerHTML = '<i class="fas fa-copy"></i>'; // Font Awesome 复制图标
-            copyButton.title = '复制到剪贴板';
-            copyButton.setAttribute('aria-label', '复制到剪贴板'); // 增强可访问性
-
-            copyButton.addEventListener('click', (event) => {
-                event.stopPropagation(); // 防止点击按钮时触发其他可能绑定在 pre 或 message 上的事件
-
-                const codeToCopy = codeBlock.textContent || ""; 
-                if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-                    navigator.clipboard.writeText(codeToCopy).then(() => {
-                        copyButton.innerHTML = '<i class="fas fa-check"></i>'; // 已复制图标
-                        copyButton.classList.add('copied');
-                        setTimeout(() => {
-                            copyButton.innerHTML = '<i class="fas fa-copy"></i>'; // 恢复原图标
-                            copyButton.classList.remove('copied');
-                        }, 2000);
-                    }).catch(err => {
-                        console.error('无法复制到剪贴板:', err);
-                        copyButton.textContent = '失败';
-                        copyButton.classList.add('copy-failed'); // 可以定义一个 .copy-failed 样式
-                        setTimeout(() => {
-                            copyButton.innerHTML = '<i class="fas fa-copy"></i>';
-                            copyButton.classList.remove('copy-failed');
-                        }, 2000);
-                        // 作为后备方案，可以尝试传统的 execCommand('copy')，但它已不推荐
-                        // fallbackCopyTextToClipboard(codeToCopy, copyButton);
-                    });
-                } else {
-                    // 如果 navigator.clipboard 不可用 (例如在非 HTTPS 环境或非常旧的浏览器)
-                    console.warn('navigator.clipboard.writeText API 不可用。尝试后备复制方法。');
-                    fallbackCopyTextToClipboard(codeToCopy, copyButton); // 调用后备方法
+    // --- 5. 代码高亮、复制代码按钮、KaTeX 渲染 (仅在消息完整时执行) ---
+    if (sourceEvent !== "chat_stream_chunk") { // 确保这是针对完整消息的
+        // 确保 contentDiv 是 '.message-content' (而不是 '.ai-response-text-streaming')
+        if (contentDiv.classList.contains('message-content')) {
+            // A. 代码高亮和复制代码按钮
+            contentDiv.querySelectorAll('pre code').forEach(block => {
+                if (typeof hljs !== 'undefined' && typeof hljs.highlightElement === 'function') {
+                    try {
+                        hljs.highlightElement(block);
+                    } catch (e) {
+                        console.error("hljs error:", e);
+                    }
+                }
+                const preElement = block.closest('pre');
+                if (preElement && !preElement.querySelector('.copy-code-button')) {
+                    const copyButton = document.createElement('button');
+                    copyButton.className = 'copy-code-button btn btn-xs btn-outline-secondary p-1';
+                    copyButton.innerHTML = '<i class="far fa-copy small"></i>';
+                    copyButton.title = '复制';
+                    copyButton.type = 'button';
+                    copyButton.addEventListener('click', (event) => { /* TODO: copy logic */ });
+                    if (getComputedStyle(preElement).position === 'static') preElement.style.position = 'relative';
+                    preElement.appendChild(copyButton);
                 }
             });
 
-            preElement.appendChild(copyButton); // 将按钮添加到 <pre> 元素
-        }
-    });
-    // --- 添加复制代码按钮的逻辑 END ---
-
-    // --- 日志代码 (保持不变) ---
-    if (sourceEvent === "chat_stream_end") {
-        console.log(`%c[KaTeX Debug from ${sourceEvent}] FINAL KaTeX Processing:`, "color: blue; font-weight: bold;");
-        console.log("Original messageText for logs:", messageText);
-        console.log("Text after preprocessing (passed to md.render):", textToRender);
-        console.log("contentDiv HTML AFTER adding copy buttons, BEFORE KaTeX render:", contentDiv.innerHTML);
-    } else if (sourceEvent === "test_button") {
-        // ... (其他日志分支)
-    } else if (sourceEvent === "history_load" || sourceEvent === "voice_chat_response" || sourceEvent === "new_screenshot_immediate_analysis" || sourceEvent === "analysis_result_update" || sourceEvent === "history_click_ss_analysis") {
-        // 合并其他 sourceEvent 的日志，避免过多分支
-        console.log(`%c[Render Debug from ${sourceEvent}] Processing:`, "color: purple;");
-        // console.log("Original messageText for logs:", messageText);
-        // console.log("Text after preprocessing (passed to md.render):", textToRender);
-        console.log("contentDiv HTML AFTER adding copy buttons, BEFORE KaTeX render:", contentDiv.innerHTML.substring(0, 300) + "..."); // 只打印部分HTML
-    }
-    // --- 日志代码结束 ---
-
-    // KaTeX 渲染应该在所有DOM操作（包括添加复制按钮）之后进行
-    if (typeof renderLatexInElement === 'function') {
-        renderLatexInElement(contentDiv);
-    } else {
-        console.warn("renderLatexInElement function is not defined. LaTeX rendering skipped.");
-    }
-}
-
-// --- 新的侧边栏切换初始化函数 ---
-function initSidebarToggle() {
-    const toggleButton = document.getElementById('toggle-sidebar-btn');
-    // 获取所有标签页下的 .main-content 元素
-    const mainContents = document.querySelectorAll('.tab-content > .main-content'); 
-    const leftPanels = document.querySelectorAll('.tab-content .left-panel'); // 用于检查初始状态
-
-    if (!toggleButton || mainContents.length === 0) {
-        console.warn("Sidebar toggle button or main content areas not found.");
-        return;
-    }
-
-    // (可选) 检查 localStorage 中是否有保存的侧边栏状态
-    let isSidebarCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
-
-    // 根据存储的状态初始化
-    function applySidebarState(collapsed) {
-        const icon = toggleButton.querySelector('i');
-        mainContents.forEach(content => {
-            if (collapsed) {
-                content.classList.add('sidebar-collapsed');
+            // B. KaTeX 渲染
+            console.log(`[ProcessAIMessage from ${sourceEvent}] HTML before KaTeX render (after copy buttons):`, contentDiv.innerHTML.substring(0, 200) + "...");
+            if (typeof renderLatexInElement === 'function') {
+                console.log(`[ProcessAIMessage from ${sourceEvent}] About to call renderLatexInElement on:`, contentDiv);
+                try {
+                    renderLatexInElement(contentDiv);
+                    console.log(`[ProcessAIMessage from ${sourceEvent}] KaTeX render attempted. HTML after:`, contentDiv.innerHTML.substring(0, 100) + "...");
+                } catch (e) {
+                    console.error(`[ProcessAIMessage from ${sourceEvent}] Error during renderLatexInElement:`, e);
+                }
             } else {
-                content.classList.remove('sidebar-collapsed');
+                console.warn(`[ProcessAIMessage from ${sourceEvent}] renderLatexInElement is not defined.`);
             }
-        });
-        if (icon) { // 改变按钮图标
-            icon.className = collapsed ? 'fas fa-bars' : 'fas fa-chevron-left'; // 或者 fa-align-justify / fa-align-left
-        }
-        // 更新 localStorage
-        localStorage.setItem('sidebarCollapsed', collapsed);
-        isSidebarCollapsed = collapsed; // 更新当前状态变量
-    }
-
-    // 初始化状态
-    applySidebarState(isSidebarCollapsed);
-
-
-    toggleButton.addEventListener('click', () => {
-        isSidebarCollapsed = !isSidebarCollapsed; // 切换状态
-        applySidebarState(isSidebarCollapsed);
-    });
-}
-
-// --- 后备的文本复制函数 (当 navigator.clipboard 不可用时) ---
-function fallbackCopyTextToClipboard(text, buttonElement) {
-    const textArea = document.createElement("textarea");
-    textArea.value = text;
-    
-    // 避免在屏幕上闪烁
-    textArea.style.top = "0";
-    textArea.style.left = "0";
-    textArea.style.position = "fixed";
-    
-    document.body.appendChild(textArea);
-    textArea.focus();
-    textArea.select();
-    
-    let successful = false;
-    try {
-        successful = document.execCommand('copy');
-        if (successful) {
-            if (buttonElement) {
-                buttonElement.innerHTML = '<i class="fas fa-check"></i>';
-                buttonElement.classList.add('copied');
-                setTimeout(() => {
-                    buttonElement.innerHTML = '<i class="fas fa-copy"></i>';
-                    buttonElement.classList.remove('copied');
-                }, 2000);
-            }
-            console.log('后备复制成功');
         } else {
-            throw new Error('document.execCommand("copy") failed');
+            console.warn(`[ProcessAIMessage from ${sourceEvent}] Attempted final rendering on non-contentDiv:`, contentDiv);
         }
-    } catch (err) {
-        console.error('后备复制失败:', err);
-        if (buttonElement) {
-            buttonElement.textContent = '失败';
-            buttonElement.classList.add('copy-failed');
-            setTimeout(() => {
-                buttonElement.innerHTML = '<i class="fas fa-copy"></i>';
-                buttonElement.classList.remove('copy-failed');
-            }, 2000);
-        }
-        // 可以提示用户手动复制
-        // alert('无法自动复制到剪贴板，请手动复制。');
+    }
+}
+// function processAIMessage(messageElement, messageText, sourceEvent = "unknown") {
+//     if (!messageElement) {
+//         console.error("processAIMessage: null messageElement. Source:", sourceEvent);
+//         return;
+//     }
+
+//     // --- 1. 设置发送者信息 (strongTag) ---
+//     let strongTag = messageElement.querySelector('strong.ai-sender-prefix');
+//     if (!strongTag) {
+//         strongTag = document.createElement('strong');
+//         strongTag.className = 'ai-sender-prefix me-1';
+//         // (插入 strongTag 的逻辑...)
+//         if (messageElement.firstChild && messageElement.firstChild.nodeType === Node.ELEMENT_NODE) {
+//             messageElement.insertBefore(strongTag, messageElement.firstChild);
+//         } else {
+//             messageElement.appendChild(strongTag);
+//         }
+//     }
+//     const providerName = messageElement.dataset.provider || 'AI';
+//     const modelId = messageElement.dataset.modelId;
+//     const modelNameShort = modelId ? ` (${modelId.split(/[-/]/).pop().substring(0, 20)})` : '';
+//     strongTag.textContent = `${providerName}${modelNameShort}:`;
+
+//     // --- 2. 获取或创建内容容器 (contentDiv) ---
+//     let contentDiv;
+//     const streamingSpan = messageElement.querySelector('.ai-response-text-streaming');
+
+//     // 如果是流式块，并且 streamingSpan 存在，则追加到 streamingSpan
+//     if (sourceEvent === "chat_stream_chunk" && streamingSpan) {
+//         contentDiv = streamingSpan; // 后续文本将追加到这里
+//     } else {
+//         // 对于非流式块、流结束，或者 streamingSpan 不存在的情况
+//         if (streamingSpan) streamingSpan.remove(); // 移除临时的流式 span
+
+//         contentDiv = messageElement.querySelector('.message-content');
+//         if (!contentDiv) {
+//             contentDiv = document.createElement('div');
+//             contentDiv.className = 'message-content';
+//             if (strongTag.nextSibling) messageElement.insertBefore(contentDiv, strongTag.nextSibling);
+//             else messageElement.appendChild(contentDiv);
+//         }
+//         contentDiv.innerHTML = ''; // 清空，为完整渲染做准备
+//     }
+
+//     // --- 3. 预处理文本 ---
+//     let textToRender = String(messageText || "");
+//     if (typeof preprocessTextForRendering === 'function') {
+//         textToRender = preprocessTextForRendering(textToRender);
+//     }
+
+//     // --- 4. Markdown 渲染 ---
+//     if (md && typeof md.render === 'function') {
+//         if (sourceEvent === "chat_stream_chunk" && contentDiv.classList.contains('ai-response-text-streaming')) {
+//             // 流式传输时，仅追加文本到 streamingSpan
+//             contentDiv.textContent += textToRender; // 注意：这里应该是 += data.chunk (原始块)，而不是预处理后的 textToRender
+//                                                  // 或者，如果预处理很快，也可以用 textToRender，但要确保只处理当前块
+//                                                  // 更好的做法是，流式传输时，由 chat_stream_chunk 事件处理器直接更新 streamingSpan.textContent
+//                                                  // processAIMessage 在流式块时不应该被这样调用
+//         } else {
+//             // 非流式或流结束后，渲染完整的 Markdown
+//             contentDiv.innerHTML = md.render(textToRender);
+//             console.log(`[ProcessAIMessage from ${sourceEvent}] HTML after md.render:`, contentDiv.innerHTML.substring(0, 200) + "...");
+//         }
+//     } else {
+//         // Fallback Markdown 渲染
+//         if (sourceEvent === "chat_stream_chunk" && contentDiv.classList.contains('ai-response-text-streaming')) {
+//             contentDiv.textContent += escapeHtml(textToRender);
+//         } else {
+//             contentDiv.innerHTML = escapeHtml(textToRender).replace(/\n/g, '<br>');
+//         }
+//     }
+
+//     // --- 5. 代码高亮、复制代码按钮、KaTeX 渲染 (仅在消息完整时执行) ---
+//     if (sourceEvent !== "chat_stream_chunk") { // 确保这是针对完整消息的
+//         // 确保 contentDiv 是 '.message-content' (而不是 '.ai-response-text-streaming')
+//         if (contentDiv.classList.contains('message-content')) {
+//             // A. 代码高亮和复制代码按钮
+//             contentDiv.querySelectorAll('pre code').forEach(block => {
+//                 if (typeof hljs !== 'undefined' && typeof hljs.highlightElement === 'function') {
+//                     try {
+//                         hljs.highlightElement(block);
+//                     } catch (e) {
+//                         console.error("hljs error:", e);
+//                     }
+//                 }
+//                 const preElement = block.closest('pre');
+//                 if (preElement && !preElement.querySelector('.copy-code-button')) {
+//                     const copyButton = document.createElement('button');
+//                     copyButton.className = 'copy-code-button btn btn-xs btn-outline-secondary p-1';
+//                     copyButton.innerHTML = '<i class="far fa-copy small"></i>';
+//                     copyButton.title = '复制';
+//                     copyButton.type = 'button';
+//                     copyButton.addEventListener('click', (event) => { /* TODO: copy logic */ });
+//                     if (getComputedStyle(preElement).position === 'static') preElement.style.position = 'relative';
+//                     preElement.appendChild(copyButton);
+//                 }
+//             });
+
+//             // B. KaTeX 渲染
+//             console.log(`[ProcessAIMessage from ${sourceEvent}] HTML before KaTeX render (after copy buttons):`, contentDiv.innerHTML.substring(0, 200) + "...");
+//             if (typeof renderLatexInElement === 'function') {
+//                 console.log(`[ProcessAIMessage from ${sourceEvent}] About to call renderLatexInElement on:`, contentDiv);
+//                 try {
+//                     renderLatexInElement(contentDiv);
+//                     console.log(`[ProcessAIMessage from ${sourceEvent}] KaTeX render attempted. HTML after:`, contentDiv.innerHTML.substring(0, 100) + "...");
+//                 } catch (e) {
+//                     console.error(`[ProcessAIMessage from ${sourceEvent}] Error during renderLatexInElement:`, e);
+//                 }
+//             } else {
+//                 console.warn(`[ProcessAIMessage from ${sourceEvent}] renderLatexInElement is not defined.`);
+//             }
+//         } else {
+//             console.warn(`[ProcessAIMessage from ${sourceEvent}] Attempted final rendering on non-contentDiv:`, contentDiv);
+//         }
+//     }
+// }
+// --- Model Selector Functions (MODIFIED) ---
+async function fetchAndPopulateModels() {
+  const modelSelectorEl = document.getElementById('model-selector');
+  // const apiProviderDisplayEl = document.getElementById('api-provider-display'); // REMOVED as element is removed from HTML
+
+  if (!modelSelectorEl) {
+    console.error("Model selector element (#model-selector) not found in the DOM. Cannot populate models.");
+    return;
+  }
+
+  modelSelectorEl.innerHTML = '<option value="">正在加载模型...</option>';
+  // if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: 加载中...'; // REMOVED
+
+  try {
+    const response = await fetch('/api/available_models', {
+      headers: { ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` }) }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`获取模型列表失败: ${response.status} ${response.statusText}. Server: ${errorText}`);
+      modelSelectorEl.innerHTML = '<option value="">加载模型失败</option>';
+      // if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: 加载失败'; // REMOVED
+      return;
+    }
+
+    availableModels = await response.json();
+    
+    if (Object.keys(availableModels).length === 0) {
+      modelSelectorEl.innerHTML = '<option value="">无可用模型</option>';
+      // if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: 无可用'; // REMOVED
+      console.warn("No available models received from the backend.");
+      return;
     }
     
-    document.body.removeChild(textArea);
+    console.log("Available models loaded:", availableModels);
+    modelSelectorEl.innerHTML = ''; // Clear "loading" or "error"
+
+    const lastSelectedProvider = localStorage.getItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER);
+    const lastSelectedModelId = localStorage.getItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID);
+    let isLastSelectedModelStillAvailable = false;
+    let firstOptionDetails = null; 
+
+    for (const providerKey in availableModels) {
+      if (Object.prototype.hasOwnProperty.call(availableModels, providerKey)) {
+        const providerModels = availableModels[providerKey];
+        if (Object.keys(providerModels).length === 0) continue;
+
+        const optgroup = document.createElement('optgroup');
+        let providerDisplayName = providerKey.charAt(0).toUpperCase() + providerKey.slice(1);
+        if (providerKey.toLowerCase() === "openai") providerDisplayName = "OpenAI";
+        else if (providerKey.toLowerCase() === "gemini") providerDisplayName = "Google Gemini";
+        optgroup.label = providerDisplayName;
+
+        for (const modelId in providerModels) {
+          if (Object.prototype.hasOwnProperty.call(providerModels, modelId)) {
+            const modelDisplayName = providerModels[modelId];
+            const option = document.createElement('option');
+            option.value = `${providerKey}:${modelId}`;
+            option.textContent = modelDisplayName;
+            option.dataset.provider = providerKey;
+            option.dataset.modelId = modelId;
+
+            // Set option style for dark/light theme compatibility for dropdown items
+            option.style.backgroundColor = "var(--bs-body-bg)";
+            option.style.color = "var(--bs-body-color)";
+
+            if (!firstOptionDetails) { 
+              firstOptionDetails = { provider: providerKey, model_id: modelId, text: modelDisplayName, value: option.value };
+            }
+
+            if (providerKey === lastSelectedProvider && modelId === lastSelectedModelId) {
+              option.selected = true;
+              isLastSelectedModelStillAvailable = true;
+            }
+
+            optgroup.appendChild(option);
+          }
+        }
+        modelSelectorEl.appendChild(optgroup);
+      }
+    }
+
+    if (modelSelectorEl.options.length === 0) {
+      modelSelectorEl.innerHTML = '<option value="">无模型</option>';
+      selectedModel.provider = null;
+      selectedModel.model_id = null;
+    } else if (isLastSelectedModelStillAvailable) {
+      // The correct option is already selected via option.selected = true;
+      // Now, trigger the handleModelSelectionChange to update the global state and localStorage
+      handleModelSelectionChange({ target: modelSelectorEl });
+    } else if (firstOptionDetails) { 
+      // If no stored selection or stored selection is no longer available, select the first one
+      modelSelectorEl.value = firstOptionDetails.value;
+      handleModelSelectionChange({ target: modelSelectorEl });
+    } else { 
+      console.error("Logic error in populating model selector - no first option found, though options exist.");
+      modelSelectorEl.innerHTML = '<option value="">错误</option>';
+    }
+
+    // Ensure event listener is added only once, or managed if function is re-run
+    modelSelectorEl.removeEventListener('change', handleModelSelectionChange); // Remove previous if any
+    modelSelectorEl.addEventListener('change', handleModelSelectionChange);
+
+  } catch (error) {
+    console.error("Error fetching or populating models:", error);
+    modelSelectorEl.innerHTML = '<option value="">加载模型失败</option>';
+    // if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: 加载失败'; // REMOVED
+  }
 }
-// --- Socket.IO Event Handlers & AI Message Processing ---
-function handleAiResponseMessage(data, isStreamEndOrFullMessage = false) {
-    // This function is now primarily a wrapper if needed, or its logic integrated into socket handlers.
-    // For simplicity, socket handlers will call processAIMessage directly or manage text accumulation.
-    // The main purpose here was to remove spinner and update history, which is now more distributed.
-    console.warn("[handleAiResponseMessage] This function might be deprecated in favor of direct socket event logic. Data:", data);
-     // The spinner removal and history update logic is now more tightly coupled with specific socket events.
+
+function handleModelSelectionChange(event) {
+  const selector = event.target;
+  const selectedOption = selector.options[selector.selectedIndex];
+  // const apiProviderDisplayEl = document.getElementById('api-provider-display'); // REMOVED
+
+  if (selectedOption && selectedOption.dataset.provider && selectedOption.dataset.modelId) {
+    selectedModel.provider = selectedOption.dataset.provider;
+    selectedModel.model_id = selectedOption.dataset.modelId;
+
+    localStorage.setItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER, selectedModel.provider);
+    localStorage.setItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID, selectedModel.model_id);
+
+    console.log("Model selected:", JSON.stringify(selectedModel));
+  } else {
+    selectedModel.provider = null;
+    selectedModel.model_id = null;
+    localStorage.removeItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER);
+    localStorage.removeItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID);
+    console.warn("Invalid model selection or no model selected.");
+  }
 }
 
-// --- Global Variables & State ---
 
-// --- 新增：主题切换相关函数 ---
 
-/**
- * 应用指定的主题到页面。
- * @param {string} themeName - 要应用的主题名称 ('light' 或 'dark').
- */
+
+// --- Model Selector Functions ---
+// async function fetchAndPopulateModels() {
+//     const modelSelectorEl = document.getElementById('model-selector');
+//     const apiProviderDisplayEl = document.getElementById('api-provider-display');
+
+//     if (!modelSelectorEl || !apiProviderDisplayEl) {
+//         console.error("Model selector or API provider display element not found in the DOM.");
+//         if (modelSelectorEl) modelSelectorEl.innerHTML = '<option value="">Error: UI Missing</option>';
+//         if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: UI错误';
+//         return;
+//     }
+
+//     modelSelectorEl.innerHTML = '<option value="">正在加载模型...</option>';
+//     apiProviderDisplayEl.textContent = 'AI模型: 加载中...';
+//     apiProviderDisplayEl.title = '正在从服务器获取可用模型列表';
+
+//     try {
+//         const response = await fetch('/api/available_models', {
+//             headers: {
+//                 // Assuming TOKEN is a global variable holding your auth token
+//                 ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` })
+//             }
+//         });
+
+//         if (!response.ok) {
+//             const errorText = await response.text();
+//             throw new Error(`获取模型列表失败: ${response.status} ${response.statusText}. ${errorText}`);
+//         }
+//         availableModels = await response.json(); // Expected: { "openai": {"gpt-4o": "OpenAI GPT-4o"}, ... }
+        
+//         if (Object.keys(availableModels).length === 0) {
+//             modelSelectorEl.innerHTML = '<option value="">无可用模型</option>';
+//             apiProviderDisplayEl.textContent = 'AI模型: 无可用';
+//             console.warn("No available models received from the backend.");
+//             return;
+//         }
+        
+//         console.log("Available models loaded:", availableModels);
+//         modelSelectorEl.innerHTML = ''; // Clear "loading" message
+
+//         const lastSelectedProvider = localStorage.getItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER);
+//         const lastSelectedModelId = localStorage.getItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID);
+//         let isLastSelectedModelStillAvailable = false;
+
+//         for (const providerKey in availableModels) {
+//             if (Object.prototype.hasOwnProperty.call(availableModels, providerKey)) {
+//                 const providerModels = availableModels[providerKey];
+//                 if (Object.keys(providerModels).length === 0) continue; // Skip empty providers
+
+//                 const optgroup = document.createElement('optgroup');
+//                 // Attempt to create a friendlier display name for the provider
+//                 let providerDisplayName = providerKey.charAt(0).toUpperCase() + providerKey.slice(1);
+//                 if (providerKey.toLowerCase() === "openai") providerDisplayName = "OpenAI";
+//                 else if (providerKey.toLowerCase() === "gemini") providerDisplayName = "Google Gemini";
+//                 else if (providerKey.toLowerCase() === "claude") providerDisplayName = "Anthropic Claude";
+//                 else if (providerKey.toLowerCase() === "grok") providerDisplayName = "xAI Grok";
+//                 optgroup.label = providerDisplayName;
+
+//                 for (const modelId in providerModels) {
+//                     if (Object.prototype.hasOwnProperty.call(providerModels, modelId)) {
+//                         const modelDisplayName = providerModels[modelId];
+//                         const option = document.createElement('option');
+//                         // Store provider and model_id in a single value for simplicity,
+//                         // or use dataset attributes as you prefer.
+//                         option.value = `${providerKey}:${modelId}`;
+//                         option.textContent = modelDisplayName;
+//                         // Store in dataset for easier access on change
+//                         option.dataset.provider = providerKey;
+//                         option.dataset.modelId = modelId;
+
+//                         if (providerKey === lastSelectedProvider && modelId === lastSelectedModelId) {
+//                             option.selected = true;
+//                             isLastSelectedModelStillAvailable = true;
+//                         }
+//                         optgroup.appendChild(option);
+//                     }
+//                 }
+//                 modelSelectorEl.appendChild(optgroup);
+//             }
+//         }
+
+//         if (modelSelectorEl.options.length === 0) {
+//             modelSelectorEl.innerHTML = '<option value="">无可用模型</option>';
+//             apiProviderDisplayEl.textContent = 'AI模型: 无可用';
+//             selectedModel.provider = null;
+//             selectedModel.model_id = null;
+//         } else if (isLastSelectedModelStillAvailable) {
+//             // Trigger change to set selectedModel and update display for the stored selection
+//             handleModelSelectionChange({ target: modelSelectorEl });
+//         } else {
+//             // If no stored selection or stored selection is no longer available, select the first option
+//             modelSelectorEl.selectedIndex = 0;
+//             handleModelSelectionChange({ target: modelSelectorEl });
+//         }
+
+//         modelSelectorEl.addEventListener('change', handleModelSelectionChange);
+
+//     } catch (error) {
+//         console.error("Error fetching or populating models:", error);
+//         modelSelectorEl.innerHTML = '<option value="">加载模型失败</option>';
+//         apiProviderDisplayEl.textContent = 'AI模型: 加载失败';
+//         apiProviderDisplayEl.title = `错误: ${error.message}`;
+//     }
+// }
+
+
+// function handleModelSelectionChange(event) {
+//     const selector = event.target;
+//     const selectedOption = selector.options[selector.selectedIndex];
+
+//     if (selectedOption && selectedOption.dataset.provider && selectedOption.dataset.modelId) {
+//         selectedModel.provider = selectedOption.dataset.provider;
+//         selectedModel.model_id = selectedOption.dataset.modelId;
+
+//         localStorage.setItem(MODEL_SELECTOR_STORAGE_KEY_PROVIDER, selectedModel.provider);
+//         localStorage.setItem(MODEL_SELECTOR_STORAGE_KEY_MODEL_ID, selectedModel.model_id);
+
+//         const apiProviderDisplayEl = document.getElementById('api-provider-display');
+//         if (apiProviderDisplayEl) {
+//             const modelDisplayName = selectedOption.textContent;
+//             // Get provider display name from optgroup label
+//             const providerDisplayName = selectedOption.parentElement.label || selectedModel.provider.toUpperCase();
+//             apiProviderDisplayEl.textContent = `AI模型: ${modelDisplayName}`;
+//             apiProviderDisplayEl.title = `当前模型: ${modelDisplayName} (来自 ${providerDisplayName})`;
+//         }
+//         console.log("Model selected:", JSON.stringify(selectedModel));
+        
+//         // Optional: You could emit an event to the server if it needs to know about the change immediately
+//         // if (socket && socket.connected) {
+//         // socket.emit('ui_model_changed', { provider: selectedModel.provider, model_id: selectedModel.model_id });
+//         // }
+//     } else {
+//         // Handle empty or invalid selection if necessary
+//         selectedModel.provider = null;
+//         selectedModel.model_id = null;
+//         const apiProviderDisplayEl = document.getElementById('api-provider-display');
+//         if (apiProviderDisplayEl) {
+//             apiProviderDisplayEl.textContent = 'AI模型: 请选择';
+//             apiProviderDisplayEl.title = '请从下拉列表中选择一个AI模型';
+//         }
+//         console.warn("Invalid model selection or no model selected.");
+//     }
+// }
+
+
 function applyTheme(themeName) {
     document.body.classList.remove('theme-light', 'theme-dark'); // 先移除所有主题类
 
@@ -945,6 +793,26 @@ function loadAndApplyInitialTheme() {
     }
 }
 
+function renderLatexInElement(element) {
+    if (!element) return;
+    try {
+        // 直接调用导入的 renderMathInElement (它应该在文件顶部被 import)
+        renderMathInElement(element, { 
+            delimiters: [
+                { left: '$$', right: '$$', display: true },
+                { left: '$', right: '$', display: false },
+                { left: '\\(', right: '\\)', display: false },
+                { left: '\\[', right: '\\]', display: true }
+            ],
+            throwOnError: false,
+            ignoredClasses: ["no-katex-render", "hljs", "no-math", "highlight", "language-"]
+        });
+    } catch (error) {
+        console.error("[KaTeX] Rendering error (通过 import):", error, "on element:", element);
+    }
+}
+
+
 /**
  * 初始化主题选择器的事件监听和初始主题加载。
  */
@@ -958,6 +826,494 @@ function initThemeSelector() {
     // 在所有UI元素都可能已加载后应用初始主题
     loadAndApplyInitialTheme();
 }
+
+// --- NEW: Main Navigation Dropdown Logic ---
+function initMainNavigation() {
+  const navDropdownItems = document.querySelectorAll('.main-navigation-dropdown-container .dropdown-item.nav-dropdown-item');
+  const dropdownButtonTextSpan = document.getElementById('selected-feature-name');
+  const leftPanelContainer = document.querySelector('aside.left-panel');
+  const rightPanelContainer = document.querySelector('main.right-panel');
+
+  // Check if essential elements exist
+  if (!navDropdownItems.length || !dropdownButtonTextSpan || !leftPanelContainer || !rightPanelContainer) {
+    console.warn("Main navigation UI elements missing for initMainNavigation.");
+    if (dropdownButtonTextSpan) dropdownButtonTextSpan.innerHTML = `<i class="fas fa-exclamation-triangle me-2"></i> Nav Error`;
+    return;
+  }
+
+  // Switch to active feature and update UI accordingly
+  function switchActiveFeature(featureKey) {
+    let newButtonText = "选择功能"; 
+    let newButtonIconHTML = '<i class="fas fa-bars me-2"></i>'; 
+
+    // Deactivate previous content
+    leftPanelContainer.querySelectorAll('.feature-content-block').forEach(content => content.classList.remove('active'));
+    rightPanelContainer.querySelectorAll('.feature-content-block').forEach(content => content.classList.remove('active'));
+    navDropdownItems.forEach(item => item.classList.remove('active'));
+
+    // Find and activate the target content blocks
+    const targetLeftPanelContent = document.getElementById(`left-panel-${featureKey}`);
+    const targetRightPanelContent = document.getElementById(`right-panel-${featureKey}`);
+    const targetNavItem = Array.from(navDropdownItems).find(item => item.dataset.feature === featureKey);
+
+    if (targetLeftPanelContent && targetRightPanelContent && targetNavItem) {
+      targetLeftPanelContent.classList.add('active');
+      targetRightPanelContent.classList.add('active');
+      targetNavItem.classList.add('active'); 
+      
+      newButtonText = targetNavItem.textContent.trim();
+      const iconEl = targetNavItem.querySelector('i.fas');
+      newButtonIconHTML = iconEl ? iconEl.outerHTML + " " : "";
+    } else {
+      console.warn(`Content blocks or nav item not found for feature: ${featureKey}. Defaulting if possible.`);
+      if (navDropdownItems.length > 0 && navDropdownItems[0].dataset.feature) {
+        const firstFeatureKey = navDropdownItems[0].dataset.feature;
+        document.getElementById(`left-panel-${firstFeatureKey}`)?.classList.add('active');
+        document.getElementById(`right-panel-${firstFeatureKey}`)?.classList.add('active');
+        navDropdownItems[0].classList.add('active');
+        newButtonText = navDropdownItems[0].textContent.trim();
+        const iconEl = navDropdownItems[0].querySelector('i.fas');
+        newButtonIconHTML = iconEl ? iconEl.outerHTML + " " : "";
+        featureKey = firstFeatureKey; 
+      }
+    }
+    
+    dropdownButtonTextSpan.innerHTML = `${newButtonIconHTML}${newButtonText}`;
+    if (featureKey === 'ai-chat') document.getElementById('chat-chat-input')?.focus();
+    localStorage.setItem(ACTIVE_MAIN_FEATURE_TAB_KEY, featureKey);
+    console.log(`Switched to main feature: ${featureKey}`);
+  }
+
+  // Event listener for dropdown item clicks
+  navDropdownItems.forEach(item => {
+    item.addEventListener('click', (e) => {
+      e.preventDefault();
+      const featureKey = item.dataset.feature; 
+      if (featureKey) switchActiveFeature(featureKey);
+    });
+  });
+
+  // Initialize with the last active feature or default feature
+  const lastActiveFeature = localStorage.getItem(ACTIVE_MAIN_FEATURE_TAB_KEY);
+  let initialFeatureKey = null;
+  const activeHTMLNavItem = Array.from(navDropdownItems).find(item => item.classList.contains('active'));
+
+  if (activeHTMLNavItem && activeHTMLNavItem.dataset.feature) initialFeatureKey = activeHTMLNavItem.dataset.feature;
+  else if (lastActiveFeature && Array.from(navDropdownItems).find(item => item.dataset.feature === lastActiveFeature)) initialFeatureKey = lastActiveFeature;
+  else if (navDropdownItems.length > 0 && navDropdownItems[0].dataset.feature) initialFeatureKey = navDropdownItems[0].dataset.feature;
+
+  if (initialFeatureKey) switchActiveFeature(initialFeatureKey);
+  else if (dropdownButtonTextSpan) dropdownButtonTextSpan.innerHTML = `<i class="fas fa-exclamation-triangle me-2"></i> 无功能`;
+}
+
+function initAiChatHandlers() {
+    document.getElementById('chat-send-chat')?.addEventListener('click', sendChatMessage);
+    document.getElementById('chat-chat-input')?.addEventListener('keypress', (e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChatMessage();}});
+    document.getElementById('chat-file-upload')?.addEventListener('change', handleFileUpload);
+    document.getElementById('chat-clear-current-chat')?.addEventListener('click', clearCurrentChatDisplay);
+    document.getElementById('chat-clear-all-sessions')?.addEventListener('click', clearAllChatSessions);
+    loadChatSessionsFromStorage();
+    const streamingToggle = document.getElementById('streaming-toggle-checkbox');
+    if (streamingToggle) {
+        const saved = localStorage.getItem('useStreamingOutput');
+        streamingToggle.checked = saved !== null ? saved === 'true' : true;
+        if(saved === null) localStorage.setItem('useStreamingOutput', 'true');
+        streamingToggle.addEventListener('change', function(){localStorage.setItem('useStreamingOutput',String(this.checked));});
+    }
+    const testRenderBtn = document.getElementById('test-render-btn');
+    if (testRenderBtn) {
+        testRenderBtn.addEventListener('click', () => {
+            const chatHistoryEl = document.getElementById('chat-chat-history'); if(!chatHistoryEl)return;
+            if(chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+            const testMsgDiv = document.createElement('div'); testMsgDiv.className = 'ai-message';
+            const testMD = "### Test MD\n\n- List\n- KaTeX: $E=mc^2$ and $$\\sum_{i=0}^n i^2 = \\frac{n(n+1)(2n+1)}{6}$$";
+            processAIMessage(testMsgDiv, testMD); // Use the main processing function
+            chatHistoryEl.appendChild(testMsgDiv); scrollToChatBottom(chatHistoryEl);
+        });
+    } else {
+        console.warn("Test render button #test-render-btn not found in HTML.");
+    }
+}
+
+// --- NEW: Left Panel Top Controls Initialization ---
+function initLeftPanelTopControls() {
+  // Toggle sidebar collapse state
+  document.querySelectorAll('.panel-sidebar-toggle-btn').forEach(button => {
+    button.addEventListener('click', () => {
+      const mainContent = button.closest('.main-content'); // The direct parent of left and right panels
+      if (mainContent) {
+        mainContent.classList.toggle('sidebar-collapsed');
+        const isCollapsed = mainContent.classList.contains('sidebar-collapsed');
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, isCollapsed);
+        console.log(`Sidebar toggled. Collapsed: ${isCollapsed}`);
+      }
+    });
+  });
+
+  // Restore sidebar collapsed state from localStorage
+  const mainContentDivs = document.querySelectorAll('.main-content');
+  const savedSidebarState = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+  if (savedSidebarState) {
+    mainContentDivs.forEach(mc => mc.classList.add('sidebar-collapsed'));
+    document.querySelectorAll('.panel-sidebar-toggle-btn i').forEach(icon => icon.className = 'fas fa-chevron-right');
+  }
+
+  // Search input event listeners (future implementation)
+  document.getElementById('screenshot-history-search-input')?.addEventListener('input', (e) => {
+    console.log("Screenshot search:", e.target.value);
+    /* TODO: Filter #ss-history-list */
+  });
+
+  document.getElementById('chat-session-search-input')?.addEventListener('input', (e) => {
+    console.log("Chat search:", e.target.value);
+    /* TODO: Filter #chat-session-list */
+  });
+
+  document.getElementById('voice-history-search-input')?.addEventListener('input', (e) => {
+    console.log("Voice search:", e.target.value);
+    /* TODO: Filter #voice-history-list */
+  });
+
+  // New action buttons
+  document.getElementById('ss-capture-btn-top')?.addEventListener('click', () => {
+    if (typeof requestScreenshot === 'function') requestScreenshot();
+    else console.warn("requestScreenshot function not defined for top button.");
+  });
+
+  document.getElementById('chat-new-session-btn-top')?.addEventListener('click', () => {
+    if (typeof clearCurrentChatDisplay === 'function') clearCurrentChatDisplay(true); // true for new session
+    else console.warn("clearCurrentChatDisplay function not defined for top button.");
+  });
+
+  document.getElementById('voice-new-recording-btn-top')?.addEventListener('click', () => {
+    const startRecordingBtn = document.getElementById('voice-start-recording');
+    if (startRecordingBtn && !startRecordingBtn.disabled) startRecordingBtn.click();
+    else console.warn("Start recording button not available or not ready.");
+  });
+}
+
+// --- File Upload Handling ---
+function handleFileUpload(e) {
+    debugLog("File input changed (handleFileUpload).");
+    const fileInput = e.target;
+    const uploadPreviewEl = document.getElementById('chat-upload-preview');
+    if (!uploadPreviewEl) { console.error("Chat upload preview element (#chat-upload-preview) not found."); return; }
+    uploadPreviewEl.innerHTML = '';
+    uploadedFile = null;
+    if (fileInput.files && fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        uploadedFile = file;
+        debugLog(`File selected: ${file.name}, Size: ${file.size}`);
+        const previewItem = document.createElement('div');
+        previewItem.className = 'preview-item';
+        const displayName = file.name.length > 40 ? file.name.substring(0, 37) + '...' : file.name;
+        previewItem.innerHTML = `<div class="file-info" title="${escapeHtml(file.name)}"><i class="fas fa-file"></i><span>${escapeHtml(displayName)} (${formatFileSize(file.size)})</span></div><button type="button" class="remove-file" title="取消选择此文件"><i class="fas fa-times"></i></button>`;
+        previewItem.querySelector('.remove-file').onclick = () => {
+            debugLog(`Removing file preview: ${file.name}`);
+            uploadPreviewEl.innerHTML = ''; uploadedFile = null; fileInput.value = '';
+        };
+        uploadPreviewEl.appendChild(previewItem);
+    } else { debugLog("File selection cancelled or no file chosen."); }
+}
+
+// --- History & UI Update Functions ---
+// 修改后的 addHistoryItem (用于截图历史记录显示)
+function addHistoryItem(item) {
+    const historyListEl = document.getElementById('ss-history-list');
+    if (!historyListEl || !item || !item.image_url) {
+        console.warn("Cannot add screenshot history item, list element or item data missing.", item);
+        return;
+    }
+
+    if (historyListEl.querySelector(`li[data-url="${item.image_url}"]`)) {
+        console.log(`Screenshot history item for ${item.image_url} already exists. Updating analysis if newer.`);
+        const existingLi = historyListEl.querySelector(`li[data-url="${item.image_url}"]`);
+        if (existingLi && typeof item.analysis === 'string' && existingLi.dataset.analysis !== item.analysis) {
+            existingLi.dataset.analysis = item.analysis;
+            const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+            if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === item.image_url) {
+                mainAnalysisEl.innerHTML = '';
+                const analysisContentDiv = document.createElement('div');
+                analysisContentDiv.className = 'message-content';
+                if (typeof processAIMessage === 'function') {
+                    const tempAiMessageDiv = document.createElement('div');
+                    tempAiMessageDiv.className = 'ai-message';
+                    tempAiMessageDiv.dataset.provider = item.provider || 'AI';
+                    processAIMessage(tempAiMessageDiv, item.analysis, 'history_item_analysis_update');
+                    while (tempAiMessageDiv.firstChild) {
+                        analysisContentDiv.appendChild(tempAiMessageDiv.firstChild);
+                    }
+                } else {
+                    analysisContentDiv.textContent = item.analysis || '(processAIMessage 未定义)';
+                }
+                mainAnalysisEl.appendChild(analysisContentDiv);
+            }
+        }
+        return;
+    }
+
+    const li = document.createElement('li');
+    li.className = 'history-item';
+    li.setAttribute('data-url', item.image_url);
+    li.dataset.analysis = item.analysis || '';
+    li.dataset.prompt = item.prompt || 'Describe this screenshot and highlight anything unusual.';
+    li.dataset.timestamp = String(item.timestamp || (Date.now() / 1000));
+    li.dataset.provider = item.provider || 'unknown';
+
+    const contentWrapper = document.createElement('div');
+    contentWrapper.className = 'history-item-content-wrapper';
+
+    const img = document.createElement('img');
+    img.src = item.image_url + '?t=' + Date.now();
+    img.alt = '历史截图缩略图';
+    img.loading = 'lazy';
+    const timestampDivForError = document.createElement('div');
+
+    img.onerror = () => {
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'history-error';
+        errorDiv.textContent = '图片加载失败';
+        if (img.parentNode) {
+            img.parentNode.replaceChild(errorDiv, img);
+        } else {
+            li.insertBefore(errorDiv, timestampDivForError);
+        }
+    };
+
+    const timestampDiv = timestampDivForError;
+    timestampDiv.className = 'history-item-text';
+    const date = new Date(parseFloat(li.dataset.timestamp) * 1000);
+    timestampDiv.textContent = date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
+    timestampDiv.title = date.toLocaleString();
+
+    contentWrapper.appendChild(img);
+    contentWrapper.appendChild(timestampDiv);
+
+    const actionsContainer = document.createElement('div');
+    actionsContainer.className = 'history-item-actions';
+
+    if (typeof createDeleteButton === 'function') {
+        const deleteBtn = createDeleteButton(() => {
+            if (confirm('确定要删除此截图记录及其分析吗?')) {
+                if (typeof clearMainScreenshotDisplay === 'function') {
+                    const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+                    if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === item.image_url) {
+                        clearMainScreenshotDisplay();
+                    }
+                }
+                li.remove();
+                console.log(`Screenshot history item ${item.image_url} deleted.`);
+            }
+        });
+        actionsContainer.appendChild(deleteBtn);
+    }
+
+    li.appendChild(contentWrapper);
+    li.appendChild(actionsContainer);
+
+    li.addEventListener('click', (e) => {
+        if (e.target.closest('.history-item-actions')) {
+            return;
+        }
+
+        const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
+        const cropCurrentBtn = document.getElementById('ss-crop-current-btn');
+
+        if (mainAnalysisEl) {
+            mainAnalysisEl.innerHTML = '';
+            const analysisContentDiv = document.createElement('div');
+            analysisContentDiv.className = 'message-content';
+            const analysisText = li.dataset.analysis || '此截图没有分析结果。';
+            const analysisProvider = li.dataset.provider || 'AI';
+            const tempAiMessageDiv = document.createElement('div');
+            tempAiMessageDiv.className = 'ai-message';
+            tempAiMessageDiv.dataset.provider = analysisProvider;
+            if (typeof processAIMessage === 'function') {
+                processAIMessage(tempAiMessageDiv, analysisText, 'history_click_ss_analysis');
+                while (tempAiMessageDiv.firstChild) {
+                    analysisContentDiv.appendChild(tempAiMessageDiv.firstChild);
+                }
+            } else {
+                analysisContentDiv.textContent = analysisText + " (processAIMessage 未定义)";
+            }
+            mainAnalysisEl.appendChild(analysisContentDiv);
+            mainAnalysisEl.dataset.sourceUrl = item.image_url;
+        }
+
+        if (mainImagePreviewEl) {
+            mainImagePreviewEl.src = item.image_url + '?t=' + Date.now();
+            mainImagePreviewEl.alt = `截图预览 - ${new Date(parseFloat(li.dataset.timestamp) * 1000).toLocaleString()}`;
+            mainImagePreviewEl.style.display = 'block';
+            mainImagePreviewEl.dataset.currentUrl = item.image_url;
+            if (cropCurrentBtn) cropCurrentBtn.style.display = 'inline-block';
+        } else {
+            if (cropCurrentBtn) cropCurrentBtn.style.display = 'none';
+        }
+
+        const currentActive = historyListEl.querySelector('.active-screenshot-item');
+        if (currentActive) currentActive.classList.remove('active-screenshot-item');
+        li.classList.add('active-screenshot-item');
+    });
+
+    historyListEl.insertBefore(li, historyListEl.firstChild);
+}
+
+function saveCurrentChatSessionId() {
+    if (currentChatSessionId) { 
+        localStorage.setItem('currentChatSessionId', currentChatSessionId); 
+    } else { 
+        localStorage.removeItem('currentChatSessionId'); 
+    }
+}
+
+// --- initAllFeatures (Main entry point for UI initialization) ---
+function initAllFeatures() {
+  console.log("--- Initializing All Features ---");
+
+  // Load token from meta tag
+  const tokenMeta = document.querySelector('meta[name="token"]');
+  if (tokenMeta?.content && tokenMeta.content !== "{{ token }}") {
+    TOKEN = tokenMeta.content;
+    console.log("Token loaded:", TOKEN);
+  } else {
+    console.warn('Token meta tag missing or placeholder.');
+  }
+
+  // Initialize Markdown renderer and theme selector if functions are available
+  if (typeof initMarkdownRenderer === 'function') initMarkdownRenderer();
+  if (typeof initThemeSelector === 'function') initThemeSelector();
+
+  // Initialize main navigation dropdown
+  initMainNavigation(); // Initialize NEW dropdown navigation first
+
+  // Fetch and populate models
+  if (typeof fetchAndPopulateModels === 'function') {
+    fetchAndPopulateModels();
+  } else {
+    console.error("CRITICAL: fetchAndPopulateModels not defined!");
+  }
+
+  // Initialize top controls for left panel
+  initLeftPanelTopControls(); // NEW: Initialize top controls for left panels
+  //initVoiceFeature()
+
+  // Render LaTeX in message content and analysis sections
+  if (typeof renderLatexInElement === 'function') {
+    setTimeout(() => { 
+      document.querySelectorAll('.message-content, .ai-analysis').forEach(element => {
+        try { 
+          renderLatexInElement(element); 
+        } catch (e) { 
+          console.error("KaTeX Error on initial load:", e, element); 
+        }
+      });
+    }, 300);
+  }
+
+  // Initialize specific feature handlers
+  if (typeof initScreenshotAnalysisHandlers === 'function') initScreenshotAnalysisHandlers();
+  if (typeof initAiChatHandlers === 'function') {
+    initAiChatHandlers(); // This should also call initChatInputBarButtons
+    //initVoiceFeature();
+  }
+  if (typeof initVoiceAnswerHandlers === 'function') initVoiceAnswerHandlers();
+
+  // Initialize Socket.IO connection
+  if (typeof initSocketIO === 'function') {
+    initSocketIO();
+  } else {
+    console.error("CRITICAL: initSocketIO not defined!");
+  }
+
+  // Load chat sessions from storage
+  if (typeof loadChatSessionsFromStorage === 'function') {
+    loadChatSessionsFromStorage();
+  } else {
+    console.warn("loadChatSessionsFromStorage not defined.");
+  }
+
+  console.log("--- Application initialization complete ---");
+}
+
+
+// 修改后的 addChatHistoryItem (AI 对话历史)
+function addChatHistoryItem(session) {
+    const historyListEl = document.getElementById('chat-session-list');
+    if (!historyListEl || !session || !session.id) {
+        console.warn("Cannot add chat session item, list or session data missing.", session);
+        return;
+    }
+
+    const existingLi = historyListEl.querySelector(`li[data-session-id="${session.id}"]`);
+    if (existingLi) existingLi.remove();
+
+    const li = document.createElement('li');
+    li.className = 'history-item chat-history-item';
+    li.setAttribute('data-session-id', String(session.id));
+
+    const contentWrapper = document.createElement('div');
+    contentWrapper.className = 'history-item-content-wrapper';
+
+    const titleText = session.title || '无标题对话';
+    const timestamp = new Date(session.id).toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
+
+    const titleDiv = document.createElement('div');
+    titleDiv.title = escapeHtml(titleText);
+    titleDiv.style.fontWeight = '500';
+    titleDiv.style.whiteSpace = 'nowrap';
+    titleDiv.style.overflow = 'hidden';
+    titleDiv.style.textOverflow = 'ellipsis';
+    titleDiv.innerHTML = `<i class="fas fa-comment"></i> ${escapeHtml(titleText)}`;
+
+    const timeDiv = document.createElement('div');
+    timeDiv.style.fontSize = '0.75em';
+    timeDiv.style.color = '#666';
+    timeDiv.textContent = timestamp;
+
+    contentWrapper.appendChild(titleDiv);
+    contentWrapper.appendChild(timeDiv);
+
+    const actionsContainer = document.createElement('div');
+    actionsContainer.className = 'history-item-actions';
+
+    if (typeof createDeleteButton === 'function') {
+        const deleteBtn = createDeleteButton(() => {
+            if (confirm(`确定要删除对话 \"${escapeHtml(titleText)}\"?`)) {
+                chatSessions = chatSessions.filter(s => s.id !== session.id);
+                li.remove();
+                if (currentChatSessionId === session.id && typeof clearCurrentChatDisplay === 'function') {
+                    clearCurrentChatDisplay();
+                }
+                if (typeof saveChatSessionsToStorage === 'function') saveChatSessionsToStorage();
+            }
+        });
+        actionsContainer.appendChild(deleteBtn);
+    }
+
+    li.appendChild(contentWrapper);
+    li.appendChild(actionsContainer);
+
+    li.addEventListener('click', (e) => {
+        if (e.target.closest('.history-item-actions')) return;
+
+        const sessionId = Number(li.getAttribute('data-session-id'));
+        const clickedSession = chatSessions.find(s => s.id === sessionId);
+        if (clickedSession) {
+            currentChatSessionId = clickedSession.id;
+            if (typeof renderChatHistory === 'function') renderChatHistory(clickedSession.history);
+
+            historyListEl.querySelectorAll('.history-item.active-session').forEach(item => item.classList.remove('active-session'));
+            li.classList.add('active-session');
+
+            document.getElementById('chat-chat-input')?.focus();
+            if (typeof saveCurrentChatSessionId === 'function') saveCurrentChatSessionId();
+        }
+    });
+
+    historyListEl.insertBefore(li, historyListEl.firstChild);
+}
+
 
 function initSocketIO() {
     socket = io({
@@ -1015,7 +1371,7 @@ function initSocketIO() {
         }
         // 立即渲染当前内容
         const contentDiv = aiDiv.querySelector('.message-content') || aiDiv.querySelector('.ai-response-text-streaming');
-        if (contentDiv) renderLatexInElement(contentDiv);
+        // if (contentDiv) renderLatexInElement(contentDiv);
         scrollToChatBottom(chatHistoryEl);
     });
 
@@ -1407,24 +1763,1051 @@ socket.on('analysis_error', function(data) {
     });
 }
 
+function saveChatSessionsToStorage() { try {localStorage.setItem('chatSessions',JSON.stringify(chatSessions));}catch(e){console.error("Failed to save chat sessions:",e);} }
+// function loadChatSessionsFromStorage() {
+//     try {
+//         const saved = localStorage.getItem('chatSessions');
+//         if (saved) {
+//             chatSessions = JSON.parse(saved);
+//             const listEl = document.getElementById('chat-session-list');
+//             if (listEl) { listEl.innerHTML = ''; chatSessions.sort((a,b)=>(b.id||0)-(a.id||0)).forEach(addChatHistoryItem); }
+//             const lastSessionId = localStorage.getItem('currentChatSessionId');
+//             if (lastSessionId && chatSessions.find(s => s.id === Number(lastSessionId))) {
+//                 currentChatSessionId = Number(lastSessionId);
+//                 const activeSessionItem = listEl?.querySelector(`[data-session-id="${currentChatSessionId}"]`);
+//                 if (activeSessionItem) activeSessionItem.click();
+//                 else clearCurrentChatDisplay();
+//             } else { clearCurrentChatDisplay(); }
+//         } else { clearCurrentChatDisplay(); }
+//     } catch (e) { console.error("Failed to load chat sessions:", e); chatSessions=[]; clearCurrentChatDisplay(); }
+// }
 
- // End of initSocketIO
+function initVoiceFeature() {
+    const startRecordingBtn = document.getElementById('voice-start-recording');
+    const stopRecordingBtn = document.getElementById('voice-stop-recording');
+    const voiceResultEl = document.getElementById('voice-result');
 
-// --- Chat Message Sending ---
-// --- Chat Message Sending ---
-// --- Chat Message Sending ---
-// server/static/main.js
+    // 检查浏览器是否支持录音功能
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+        if (startRecordingBtn) startRecordingBtn.disabled = true;
+        if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+        if (voiceResultEl) voiceResultEl.textContent = '抱歉，您的浏览器不支持录音功能。';
+        console.warn("Browser does not support MediaRecorder or getUserMedia.");
+        return;
+    }
 
-// (确保这些全局变量在文件顶部已定义)
-// let socket = null; // Your existing socket instance
-// let uploadedFile = null; // Your existing uploadedFile variable
-// let currentChatSessionId = null; // Your existing currentChatSessionId variable
-// let chatSessions = []; // Your existing chatSessions array
-// let TOKEN = ''; // Your existing TOKEN variable
-// let selectedModel = { provider: null, model_id: null }; // Defined in previous step
+    // 确保所有必要的元素都存在
+    if (!startRecordingBtn || !stopRecordingBtn || !voiceResultEl) {
+        console.error("Voice feature UI elements not found (start/stop button or result area).");
+        return;
+    }
 
-// (其他辅助函数如 debugLog, escapeHtml, formatFileSize, generateUUID, scrollToChatBottom, removeThinkingIndicator, 
-// addChatHistoryItem, saveCurrentChatSessionId, saveChatSessionsToStorage 假设已存在且功能正确)
+    // "开始录音"按钮的事件监听器
+    startRecordingBtn.addEventListener('click', async () => {
+        audioChunks = []; // 清空之前的音频片段
+
+        // 禁用开始按钮，启用停止按钮，更新UI为录音状态
+        startRecordingBtn.disabled = true;
+        stopRecordingBtn.disabled = false;
+        if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中...</p>`;
+
+        try {
+            // 请求麦克风访问权限
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+            // 确定浏览器支持的MIME类型
+            const supportedMimeTypes = [
+                'audio/webm', 
+                'audio/webm;codecs=opus',
+                'audio/ogg;codecs=opus',
+                'audio/mp4',
+                'audio/mpeg',
+                'audio/wav'
+            ];
+            
+            let supportedMimeType = '';
+            for (const mimeType of supportedMimeTypes) {
+                if (MediaRecorder.isTypeSupported(mimeType)) {
+                    supportedMimeType = mimeType;
+                    break;
+                }
+            }
+            
+            if (!supportedMimeType) {
+                throw new Error("浏览器不支持任何可用的音频格式。");
+            }
+            
+            console.log("[VOICE] Using MIME type:", supportedMimeType);
+
+            mediaRecorder = new MediaRecorder(stream, { mimeType: supportedMimeType });
+
+            // *** 生成并设置当前语音请求的唯一ID ***
+            window.currentVoiceRequestId = generateUUID();
+            console.log('[VOICE] New currentVoiceRequestId set:', window.currentVoiceRequestId);
+            // 更新UI，可以包含部分ID用于调试
+            if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中... (ID: ${window.currentVoiceRequestId.substring(0,8)})</p>`;
+
+
+            mediaRecorder.ondataavailable = event => {
+                if (event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                console.log("[VOICE] MediaRecorder stopped. Processing audio...");
+                
+                // 停止所有音轨
+                stream.getTracks().forEach(track => track.stop());
+                
+                // 检查是否有录制的音频数据
+                if (audioChunks.length === 0) {
+                    console.error("[VOICE] No audio data recorded.");
+                    if (voiceResultEl) voiceResultEl.innerHTML = '<p class="error-message">未录制到音频数据，请重试。</p>';
+                    startRecordingBtn.disabled = false;
+                    stopRecordingBtn.disabled = true;
+                    window.currentVoiceRequestId = null; // 清理ID
+                    return;
+                }
+                
+                // 合并音频块并发送到服务器
+                const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                console.log(`[VOICE] Audio recorded: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
+                
+                // 发送到服务器处理
+                sendVoiceToServer(audioBlob);
+                
+                // 注意：按钮状态和UI更新由 sendVoiceToServer 函数处理
+            };
+
+            mediaRecorder.onerror = (event) => {
+                console.error("[VOICE] MediaRecorder error:", event.error);
+                if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">录音错误: ${event.error.message || '未知错误'}</p>`;
+                startRecordingBtn.disabled = false;
+                stopRecordingBtn.disabled = true;
+                window.currentVoiceRequestId = null; // 清理ID
+                
+                // 确保所有音轨都被停止
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+            };
+
+            // 开始录音
+            mediaRecorder.start();
+            console.log("[VOICE] Recording started.");
+
+        } catch (error) {
+            console.error("[VOICE] Error starting recording:", error);
+            if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">无法开始录音: ${error.message}</p>`;
+            startRecordingBtn.disabled = false;
+            stopRecordingBtn.disabled = true;
+            window.currentVoiceRequestId = null; // 清理ID
+        }
+    });
+
+    // "停止录音"按钮的事件监听器
+    stopRecordingBtn.addEventListener('click', () => {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            console.log("[VOICE] Stop recording button clicked.");
+            mediaRecorder.stop(); // 这会触发 mediaRecorder.onstop
+        }
+        // 按钮状态的更新主要由 onstop 和 onerror 控制，以及后续的Socket.IO事件
+        // stopRecordingBtn.disabled = true; // 立即禁用，防止重复点击
+        // startRecordingBtn.disabled = false; // 暂时不启用，等待处理结果
+    });
+
+    // 语音模块历史记录清除按钮 (如果这个逻辑不在这里，确保它在别处正确初始化)
+    document.getElementById('voice-clear-history')?.addEventListener('click', clearVoiceHistory);
+}
+
+
+// 修改后的 addVoiceHistoryItem (语音历史记录)
+function addVoiceHistoryItem(item) {
+    const voiceHistoryListEl = document.getElementById('voice-history-list');
+    if (!voiceHistoryListEl || !item) {
+        console.warn("Cannot add voice history item, list or item data missing.", item);
+        return;
+    }
+
+    const li = document.createElement('li');
+    li.className = 'history-item voice-history-item';
+    li.dataset.transcript = item.transcript || '无法识别';
+    li.dataset.response = item.response || '无回答';
+    const timestampForStorage = Date.now();
+    li.dataset.timestamp = String(timestampForStorage / 1000);
+
+    const contentWrapper = document.createElement('div');
+    contentWrapper.className = 'history-item-content-wrapper';
+
+    const timestamp = new Date(timestampForStorage).toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
+    const transcript = item.transcript || '无法识别';
+    const transcriptDisplay = transcript.length > 30 ? transcript.substring(0, 27) + '...' : transcript;
+
+    const timeDivVoice = document.createElement('div');
+    timeDivVoice.innerHTML = `<strong><i class="fas fa-clock"></i> ${timestamp}</strong>`;
+
+    const transcriptDivVoice = document.createElement('div');
+    transcriptDivVoice.title = escapeHtml(transcript);
+    transcriptDivVoice.innerHTML = `<i class="fas fa-comment-dots"></i> ${escapeHtml(transcriptDisplay)}`;
+
+    contentWrapper.appendChild(timeDivVoice);
+    contentWrapper.appendChild(transcriptDivVoice);
+
+    const actionsContainer = document.createElement('div');
+    actionsContainer.className = 'history-item-actions';
+
+    if (typeof createDeleteButton === 'function') {
+        const deleteBtn = createDeleteButton(() => {
+            if (confirm('确定要删除此语音记录吗?')) {
+                li.remove();
+                const voiceResultEl = document.getElementById('voice-result');
+                if (voiceResultEl && voiceResultEl.dataset.associatedTimestamp === String(timestampForStorage)) {
+                    voiceResultEl.innerHTML = '点击下方按钮开始录音，识别结果和 AI 回答将显示在此处。';
+                    delete voiceResultEl.dataset.associatedTimestamp;
+                }
+            }
+        });
+        actionsContainer.appendChild(deleteBtn);
+    }
+
+    li.appendChild(contentWrapper);
+    li.appendChild(actionsContainer);
+
+    li.addEventListener('click', (e) => {
+        if (e.target.closest('.history-item-actions')) return;
+
+        const voiceResultEl = document.getElementById('voice-result');
+        if (voiceResultEl) {
+            voiceResultEl.innerHTML = '';
+            voiceResultEl.dataset.associatedTimestamp = String(timestampForStorage);
+
+            const stashedTranscript = li.dataset.transcript;
+            const stashedResponse = li.dataset.response;
+
+            const transcriptHtml = `<div style="margin-bottom:0.5rem;"><strong><i class="fas fa-comment-dots"></i> 识别结果:</strong><div class="message-content-simple">${escapeHtml(stashedTranscript)}</div></div>`;
+
+            const aiResponseContainer = document.createElement('div');
+            aiResponseContainer.innerHTML = `<strong><i class="fas fa-robot"></i> AI回答:</strong>`;
+
+            const aiMessageDiv = document.createElement('div');
+            aiMessageDiv.className = 'ai-message';
+            if (typeof processAIMessage === 'function') {
+                processAIMessage(aiMessageDiv, stashedResponse, 'voice_history_click');
+            } else {
+                aiMessageDiv.textContent = stashedResponse + " (processAIMessage 未定义)";
+            }
+            aiResponseContainer.appendChild(aiMessageDiv);
+
+            voiceResultEl.innerHTML = transcriptHtml + '<hr>';
+            voiceResultEl.appendChild(aiResponseContainer);
+        }
+
+        voiceHistoryListEl.querySelectorAll('.history-item.active-session').forEach(i => i.classList.remove('active-session'));
+        li.classList.add('active-session');
+    });
+
+    voiceHistoryListEl.insertBefore(li, voiceHistoryListEl.firstChild);
+}
+
+function initVoiceAnswerHandlers() {
+    initVoiceFeature();
+
+    const clearBtn = document.getElementById('voice-clear-history');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', clearVoiceHistory);
+    }
+}
+
+
+function renderChatHistory(historyArray) {
+    const chatHistoryEl=document.getElementById('chat-chat-history');
+    if(!chatHistoryEl)return;
+// --- Selection Controls for Image Cropping ---
+function initSelectionControls() {
+    const overlayEl = document.getElementById('overlay');
+    const imgEl = document.getElementById('overlay-image');
+    const selBox = document.getElementById('selection-box');
+    
+    if (!overlayEl || !imgEl || !selBox) {
+        console.error("Required overlay elements not found for selection controls");
+        return;
+    }
+    
+    // Reset state
+    isDragging = false;
+    dragType = '';
+    
+    // Mouse down on selection box - start resize/move
+    selBox.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        isDragging = true;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        
+        // Determine drag type based on where the mouse is within the selection box
+        const rect = selBox.getBoundingClientRect();
+        const edgeThreshold = 10; // pixels from edge to consider as resize
+        
+        const isNearLeftEdge = Math.abs(e.clientX - rect.left) < edgeThreshold;
+        const isNearRightEdge = Math.abs(e.clientX - rect.right) < edgeThreshold;
+        const isNearTopEdge = Math.abs(e.clientY - rect.top) < edgeThreshold;
+        const isNearBottomEdge = Math.abs(e.clientY - rect.bottom) < edgeThreshold;
+        
+        if (isNearRightEdge && isNearBottomEdge) dragType = 'resize-se';
+        else if (isNearLeftEdge && isNearBottomEdge) dragType = 'resize-sw';
+        else if (isNearRightEdge && isNearTopEdge) dragType = 'resize-ne';
+        else if (isNearLeftEdge && isNearTopEdge) dragType = 'resize-nw';
+        else if (isNearRightEdge) dragType = 'resize-e';
+        else if (isNearLeftEdge) dragType = 'resize-w';
+        else if (isNearBottomEdge) dragType = 'resize-s';
+        else if (isNearTopEdge) dragType = 'resize-n';
+        else dragType = 'move';
+        
+        // Update cursor based on drag type
+        if (dragType === 'resize-se' || dragType === 'resize-nw') selBox.style.cursor = 'nwse-resize';
+        else if (dragType === 'resize-sw' || dragType === 'resize-ne') selBox.style.cursor = 'nesw-resize';
+        else if (dragType === 'resize-e' || dragType === 'resize-w') selBox.style.cursor = 'ew-resize';
+        else if (dragType === 'resize-s' || dragType === 'resize-n') selBox.style.cursor = 'ns-resize';
+        else selBox.style.cursor = 'move';
+    });
+    
+    // Mouse down on image (outside selection) - start new selection
+    imgEl.addEventListener('mousedown', (e) => {
+        if (e.target === imgEl) { // Only if directly on the image, not on the selection box
+            e.preventDefault();
+            isDragging = true;
+            dragType = 'new-selection';
+            dragStartX = e.clientX;
+            dragStartY = e.clientY;
+            
+            // Calculate position relative to image
+            const imgRect = imgEl.getBoundingClientRect();
+            const x = e.clientX - imgRect.left;
+            const y = e.clientY - imgRect.top;
+            
+            // Start with a 1x1 selection at the click point
+            selection = {
+                x: x,
+                y: y,
+                width: 1,
+                height: 1
+            };
+            
+            updateSelectionBox();
+        }
+    });
+    
+    // Mouse move - update selection based on drag type
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        e.preventDefault();
+        
+        const dx = e.clientX - dragStartX;
+        const dy = e.clientY - dragStartY;
+        const imgRect = imgEl.getBoundingClientRect();
+        
+        // Handle different drag types
+        if (dragType === 'new-selection') {
+            // For new selection, adjust width and height based on drag direction
+            if (dx > 0) {
+                selection.width = dx;
+            } else {
+                selection.x = Math.max(0, selection.x + dx);
+                selection.width = Math.abs(dx);
+            }
+            
+            if (dy > 0) {
+                selection.height = dy;
+            } else {
+                selection.y = Math.max(0, selection.y + dy);
+                selection.height = Math.abs(dy);
+            }
+            
+            // Ensure selection stays within image bounds
+            if (selection.x + selection.width > imgEl.width) {
+                selection.width = imgEl.width - selection.x;
+            }
+            if (selection.y + selection.height > imgEl.height) {
+                selection.height = imgEl.height - selection.y;
+            }
+        } else if (dragType === 'move') {
+            // Move the entire selection
+            selection.x = Math.max(0, Math.min(imgEl.width - selection.width, selection.x + dx));
+            selection.y = Math.max(0, Math.min(imgEl.height - selection.height, selection.y + dy));
+        } else if (dragType.startsWith('resize-')) {
+            // Resize the selection based on which edge/corner is being dragged
+            if (dragType.includes('e')) { // Right edge
+                selection.width = Math.max(10, Math.min(imgEl.width - selection.x, selection.width + dx));
+            }
+            if (dragType.includes('w')) { // Left edge
+                const newX = Math.max(0, Math.min(selection.x + selection.width - 10, selection.x + dx));
+                selection.width = selection.x + selection.width - newX;
+                selection.x = newX;
+            }
+            if (dragType.includes('s')) { // Bottom edge
+                selection.height = Math.max(10, Math.min(imgEl.height - selection.y, selection.height + dy));
+            }
+            if (dragType.includes('n')) { // Top edge
+                const newY = Math.max(0, Math.min(selection.y + selection.height - 10, selection.y + dy));
+                selection.height = selection.y + selection.height - newY;
+                selection.y = newY;
+            }
+        }
+        
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        updateSelectionBox();
+        
+        // Update crop info
+        const cropInfoEl = document.getElementById('crop-info');
+        if (cropInfoEl) {
+            cropInfoEl.textContent = `选择区域: ${Math.round(selection.x)},${Math.round(selection.y)} ${Math.round(selection.width)}x${Math.round(selection.height)}`;
+        }
+    });
+    
+    // Mouse up - end dragging
+    document.addEventListener('mouseup', () => {
+        if (isDragging) {
+            isDragging = false;
+            if (selBox) selBox.style.cursor = 'move';
+        }
+    });
+    
+    // Update selection box position and size
+    updateSelectionBox();
+}
+
+// --- Voice Feature Initialization ---
+
+
+// --- Storage Functions ---
+function saveChatSessionsToStorage() { 
+    try {
+        localStorage.setItem('chatSessions', JSON.stringify(chatSessions));
+    } catch(e) {
+        console.error("Failed to save chat sessions:", e);
+    } 
+}
+
+
+
+
+// --- Base Button Handlers ---
+function initBaseButtonHandlers() {
+    // --- Test Render Button ---
+    document.getElementById('test-render-btn')?.addEventListener('click', () => {
+        const chatHistoryEl = document.getElementById('chat-chat-history');
+        if (!chatHistoryEl) return;
+        if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+        const testMsgDiv = document.createElement('div');
+        testMsgDiv.className = 'ai-message';
+        const testMD = "### Test MD\n\n- List\n- KaTeX: $E=mc^2$ and $$\\sum_{i=0}^n i^2 = \\frac{n(n+1)(2n+1)}{6}$$";
+        processAIMessage(testMsgDiv, testMD, "test_button"); // <--- 标记来源
+        chatHistoryEl.appendChild(testMsgDiv);
+        scrollToChatBottom(chatHistoryEl);
+    });
+
+    // --- Other button handlers ---
+    document.getElementById('clear-chat-btn')?.addEventListener('click', () => {
+        const chatHistoryEl = document.getElementById('chat-chat-history');
+        if (chatHistoryEl) chatHistoryEl.innerHTML = '';
+    });
+
+    document.getElementById('copy-last-msg-btn')?.addEventListener('click', () => {
+        const lastMsg = document.querySelector('#chat-chat-history .message-content:last-child');
+        if (lastMsg) {
+            navigator.clipboard.writeText(lastMsg.textContent).then(() => {
+                console.log('[Clipboard] Copied last message');
+            }).catch(err => {
+                console.error('[Clipboard] Copy failed:', err);
+            });
+        }
+    });
+
+    // --- Screenshot Analysis Handlers ---
+    document.getElementById('ss-capture-btn')?.addEventListener('click', requestScreenshot);
+    document.getElementById('ss-clear-history')?.addEventListener('click', clearScreenshotHistory);
+    document.getElementById('ss-crop-current-btn')?.addEventListener('click', () => {
+        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
+        if (mainImagePreviewEl && mainImagePreviewEl.dataset.currentUrl) {
+            showImageOverlay(mainImagePreviewEl.dataset.currentUrl);
+        } else {
+            alert('没有当前显示的图片可裁剪');
+        }
+    });
+
+    // --- Chat Handlers ---
+    document.getElementById('chat-send-chat')?.addEventListener('click', sendChatMessage);
+    document.getElementById('chat-chat-input')?.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendChatMessage();
+        }
+    });
+    document.getElementById('chat-file-upload')?.addEventListener('change', handleFileUpload);
+    document.getElementById('chat-clear-current-chat')?.addEventListener('click', clearCurrentChatDisplay);
+    document.getElementById('chat-clear-all-sessions')?.addEventListener('click', clearAllChatSessions);
+
+    // --- Voice Handlers ---
+    // Note: Voice recording buttons are handled in initVoiceFeature
+    document.getElementById('voice-clear-history')?.addEventListener('click', clearVoiceHistory);
+
+    // --- Overlay Controls ---
+    document.getElementById('overlay-close')?.addEventListener('click', hideImageOverlay);
+    document.getElementById('overlay-confirm')?.addEventListener('click', confirmCrop);
+    document.getElementById('overlay-cancel')?.addEventListener('click', hideImageOverlay);
+}
+    chatHistoryEl.innerHTML='';
+    if(!historyArray||historyArray.length===0){ chatHistoryEl.innerHTML='<div class="system-message">对话为空...</div>'; return; }
+    historyArray.forEach(turn=>{
+        if (!turn || !turn.role || !turn.parts || !turn.parts[0]) return;
+        const role=turn.role; const text=(turn.parts?.[0]?.text)||"";
+        const msgDiv=document.createElement('div');
+        // Strong tag and contentDiv will be handled by processAIMessage for AI, or created directly for user
+        if(role==='user'){
+            msgDiv.className='user-message';
+            const strongTag=document.createElement('strong'); strongTag.textContent="您: "; msgDiv.appendChild(strongTag);
+            const contentDiv=document.createElement('div'); contentDiv.className='message-content';
+            contentDiv.textContent = text; // User messages are plain text
+            const fileMatch = text.match(/\[用户上传了文件: (.*?)\]/);
+            if (fileMatch && fileMatch[1]) {
+                contentDiv.textContent = text.replace(fileMatch[0], '').trim();
+                const fileInfo = document.createElement('div'); fileInfo.className = 'attached-file';
+                fileInfo.innerHTML = `<i class="fas fa-paperclip"></i> (文件: ${escapeHtml(fileMatch[1])})`;
+                if (contentDiv.textContent) contentDiv.appendChild(document.createElement('br'));
+                contentDiv.appendChild(fileInfo);
+            }
+            msgDiv.appendChild(contentDiv);
+        } else if(role==='model'){
+            msgDiv.className='ai-message';
+            // processAIMessage will add the strong tag and contentDiv internally
+            processAIMessage(msgDiv, text, "history_load"); // <--- 标记来源
+        } else { 
+            msgDiv.className='system-message'; // Or some other class
+            const strongTag=document.createElement('strong'); strongTag.textContent = `${role}: `; msgDiv.appendChild(strongTag);
+            const contentDiv=document.createElement('div'); contentDiv.className='message-content';
+            contentDiv.textContent = text;
+            msgDiv.appendChild(contentDiv);
+        }
+        chatHistoryEl.appendChild(msgDiv);
+    });
+    scrollToChatBottom(chatHistoryEl);
+}
+
+function updateConnectionStatus(isConnected){
+    const ind=document.getElementById('connection-indicator'),st=document.getElementById('connection-status');
+    if(ind&&st){
+        ind.className=`status-indicator ${isConnected?'connected':'disconnected'}`;
+        st.textContent=`实时连接: ${isConnected?'已连接':'未连接'}`;
+        ind.title=`Socket.IO ${isConnected?'Connected':'Disconnected'}`;
+    }
+}
+
+function updateApiInfo(d){
+    const el=document.getElementById('api-provider-display');
+    if(el){
+        el.textContent=`AI模型: ${d?.provider||'未知'}`;
+        el.title=d?.provider?`Using ${d.provider}`:'AI Provider Info Unavailable';
+    }
+}
+
+function clearScreenshotHistory(){
+    if(confirm('清空所有截图历史?')){
+        const el=document.getElementById('ss-history-list');
+        if(el)el.innerHTML='';
+        const anEl=document.getElementById('ss-ai-analysis');
+        if(anEl){
+            anEl.textContent='点击历史查看分析...';
+            delete anEl.dataset.sourceUrl;
+        }
+        if (typeof clearMainScreenshotDisplay === 'function') {
+            clearMainScreenshotDisplay();
+        }
+    }
+}
+
+function clearCurrentChatDisplay(isNewSessionStart = false){
+    const el=document.getElementById('chat-chat-history');
+    if(el)el.innerHTML='<div class="system-message">选择记录或开始新对话...</div>';
+    currentChatSessionId=null;
+    document.getElementById('chat-session-list')?.querySelectorAll('.active-session').forEach(i=>i.classList.remove('active-session'));
+    document.getElementById('chat-chat-input')?.focus(); 
+    saveCurrentChatSessionId();
+    
+    // 如果是新会话开始，可以在这里添加额外的逻辑
+    if (isNewSessionStart) {
+        // 例如，可以清空输入框
+        const chatInputEl = document.getElementById('chat-chat-input');
+        if (chatInputEl) chatInputEl.value = '';
+        
+        // 清空文件上传预览
+        const uploadPreviewEl = document.getElementById('chat-upload-preview');
+        if (uploadPreviewEl) uploadPreviewEl.innerHTML = '';
+        uploadedFile = null;
+        
+        // 重置文件输入
+        const fileInputEl = document.getElementById('chat-file-upload');
+        if (fileInputEl) fileInputEl.value = '';
+    }
+}
+
+function clearAllChatSessions(){
+    if(confirm('永久删除所有对话?')){
+        chatSessions=[];
+        currentChatSessionId=null;
+        const el=document.getElementById('chat-session-list');
+        if(el)el.innerHTML='';
+        clearCurrentChatDisplay();
+        saveChatSessionsToStorage();
+        saveCurrentChatSessionId();
+    }
+}
+
+function clearVoiceHistory(){
+    if(confirm('清空所有语音历史?')){
+        const el=document.getElementById('voice-history-list');
+        if(el)el.innerHTML='';
+        const resEl=document.getElementById('voice-result');
+        if(resEl)resEl.textContent='点击开始录音...';
+    }
+}
+
+// --- API & Server Communication ---
+function getApiInfo() {
+    if (!TOKEN) { updateApiInfo({ provider: '未知 (Token未设置)' }); return; }
+    fetch('/api_info', { headers: { 'Authorization': `Bearer ${TOKEN}` } })
+    .then(r=>{if(r.status===401)throw new Error('Unauthorized');if(!r.ok)throw new Error(`API信息获取失败(${r.status})`);return r.json();})
+    .then(updateApiInfo).catch(e=>{console.error('API info error:',e);updateApiInfo({provider:`错误(${e.message})`});});
+}
+
+function sendVoiceToServer(audioBlob) {
+    const fd = new FormData();
+    const timestamp = Date.now();
+    // 后端会根据上传的文件名和内容确定格式，这里的文件名主要是为了 FormData
+    fd.append('audio', audioBlob, `recorded_audio_${timestamp}.wav`); 
+
+    const requestIdForThisOperation = window.currentVoiceRequestId; // 获取当前操作的ID
+
+    // 1. 检查并添加 request_id
+    if (requestIdForThisOperation) {
+        fd.append('request_id', requestIdForThisOperation);
+        console.log('[VOICE] Sending voice to /process_voice with client-generated request_id:', requestIdForThisOperation);
+    } else {
+        console.error("[VOICE] CRITICAL: window.currentVoiceRequestId was NOT SET when sendVoiceToServer was called! Aborting send.");
+        const voiceResultEl = document.getElementById('voice-result');
+        if(voiceResultEl) voiceResultEl.innerHTML = '<p class="error-message">内部错误：请求ID丢失，无法发送语音。请重试。</p>';
+        // 重新启用开始录音按钮，禁用停止按钮
+        const startBtn = document.getElementById('voice-start-recording');
+        const stopBtn = document.getElementById('voice-stop-recording');
+        if(startBtn) startBtn.disabled = false;
+        if(stopBtn) stopBtn.disabled = true;
+        return; // 中止发送
+    }
+
+    // 2. 添加 socket_id (可选，用于后端尝试定向发送 Socket.IO 事件)
+    if (socket && socket.id) {
+        fd.append('socket_id', socket.id);
+        // console.log('[VOICE] Sending with socket_id:', socket.id); // 日志可选
+    } else {
+        console.warn('[VOICE] Socket not available or socket.id is missing when sending voice. Backend will likely broadcast Socket.IO events.');
+    }
+    
+    // 3. 更新UI为"处理中..."状态
+    const voiceResultEl = document.getElementById('voice-result');
+    const startRecordingBtn = document.getElementById('voice-start-recording');
+    const stopRecordingBtn = document.getElementById('voice-stop-recording');
+
+    if (voiceResultEl) {
+        const displayRequestId = (requestIdForThisOperation || 'N/A').substring(0, 8);
+        voiceResultEl.innerHTML = `<p><i class="fas fa-spinner fa-spin"></i> 处理中... (ID: ${displayRequestId})</p>`;
+    }
+    // 按钮状态：开始录音禁用（因为正在处理），停止录音禁用（因为已停止）
+    if (startRecordingBtn) startRecordingBtn.disabled = true;
+    if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+
+
+    // 4. 发送 fetch 请求到后端 /process_voice
+    fetch('/process_voice', { 
+        method: 'POST', 
+        body: fd, 
+        headers: { 
+            ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` }) 
+        }
+    })
+    .then(response => {
+        if (!response.ok) {
+            return response.json().catch(() => ({ 
+                message: `语音请求失败，服务器状态: ${response.status} ${response.statusText}` 
+            })).then(errorData => {
+                throw new Error(errorData.message || JSON.stringify(errorData));
+            });
+        }
+        return response.json();
+    })
+    .then(data => {
+        console.log('[AI DEBUG] Voice ack from /process_voice:', data); 
+        if (data.status === 'processing' && data.request_id) {
+            // 确认后端返回的 request_id 与我们发送的一致
+            if (data.request_id !== requestIdForThisOperation) {
+                console.warn(`[VOICE] MISMATCH in HTTP ACK! Client sent ${requestIdForThisOperation}, server ACK'd for ${data.request_id}. This indicates a server-side issue if it's not using the provided ID. Subsequent Socket.IO events might not match.`);
+                // 理论上，如果后端正确使用了前端提供的ID，这里不应该出现mismatch。
+                // 如果出现，需要检查后端 /process_voice 路由获取 request_id 的逻辑。
+            } else {
+                console.log(`[VOICE] HTTP ACK matches sent request_id: ${data.request_id}. Waiting for Socket.IO events.`);
+            }
+            // UI 已经是"处理中..."，按钮状态也已设置。等待 Socket.IO 事件来更新最终结果或错误。
+        } else {
+            const errorMessage = data.message || data.error || '语音请求未被正确处理。';
+            console.error('[VOICE] Voice processing initiation failed on server (non-202 or missing processing status):', errorMessage);
+            if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">语音处理启动失败: ${escapeHtml(errorMessage)}</p>`;
+            if (startRecordingBtn) startRecordingBtn.disabled = false;
+            if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+            window.currentVoiceRequestId = null; // 清理ID，允许新的操作
+        }
+    })
+    .catch(error => {
+        console.error('[VOICE] Error sending voice or handling server ack:', error);
+        if (voiceResultEl) {
+            voiceResultEl.innerHTML = `<p class="error-message">语音请求发送失败: ${escapeHtml(error.message)}</p>`;
+        }
+        if (startRecordingBtn) startRecordingBtn.disabled = false;
+        if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+        window.currentVoiceRequestId = null; // 出错时清理ID，允许新的操作
+    });
+}
+
+function requestScreenshot(){
+    if(socket?.connected)socket.emit('request_screenshot_capture');
+    else alert('无法请求截图：未连接');
+}
+
+// --- Image Overlay & Cropping ---
+function hideImageOverlay(){
+    const o=document.getElementById('overlay'); if(o)o.style.display='none';
+    currentImage=null; const p=document.getElementById('prompt-input'); if(p)p.value='';
+}
+
+function showImageOverlay(imageUrl) {
+    const overlay=document.getElementById('overlay'),imgEl=document.getElementById('overlay-image'),selBox=document.getElementById('selection-box'),cropInf=document.getElementById('crop-info');
+    if(!overlay||!imgEl||!selBox||!cropInf)return;currentImage=imageUrl;imgEl.src='';imgEl.src=`${imageUrl}?t=${Date.now()}`;overlay.style.display='flex';
+    imgEl.onload=()=>{selection={x:0,y:0,width:imgEl.width,height:imgEl.height};updateSelectionBox();initSelectionControls();cropInf.textContent='拖拽调整区域或确认全图';};
+    imgEl.onerror=()=>{alert('图片预览加载失败');hideImageOverlay();};
+}
+
+function confirmCrop() {
+    if (!currentImage) { alert('错误：没有当前图片。'); return; }
+    const overlayImageEl = document.getElementById('overlay-image');
+    if (!overlayImageEl || !overlayImageEl.naturalWidth) { alert('错误：图片未加载。'); return; }
+    const scaleX = overlayImageEl.naturalWidth / overlayImageEl.width;
+    const scaleY = overlayImageEl.naturalHeight / overlayImageEl.height;
+    const oSel = { 
+        x: Math.round(selection.x * scaleX), y: Math.round(selection.y * scaleY), 
+        width: Math.round(selection.width * scaleX), height: Math.round(selection.height * scaleY) 
+    };
+
+    const fd = new FormData();
+    fd.append('image_url', currentImage); // original image URL
+    fd.append('x', oSel.x); fd.append('y', oSel.y);
+    fd.append('width', oSel.width); fd.append('height', oSel.height);
+    
+    const prmptEl = document.getElementById('prompt-input');
+    if (prmptEl?.value.trim()) fd.append('prompt', prmptEl.value.trim());
+
+    // Add selected model information
+    if (selectedModel.provider && selectedModel.model_id) {
+        fd.append('provider', selectedModel.provider);
+        fd.append('model_id', selectedModel.model_id);
+    } else {
+        console.warn("Confirm Crop: No model selected, backend will use default for analysis.");
+    }
+
+    const analysisEl = document.getElementById('ss-ai-analysis');
+    if (analysisEl) analysisEl.innerHTML = `<i class="fas fa-spinner fa-spin"></i> 分析裁剪区域 (模型: ${selectedModel.provider || '默认'}/${selectedModel.model_id || '默认'})...`;
+    hideImageOverlay(); // Assuming defined
+
+    fetch('/crop_image', { method: 'POST', headers: { ...(TOKEN && {'Authorization': `Bearer ${TOKEN}`}) }, body: fd })
+    .then(r => {
+        if (!r.ok) return r.json().catch(() => ({error: `HTTP ${r.status}`})).then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
+        return r.json();
+    })
+    .then(d => {
+        debugLog(`Crop and re-analysis request acknowledged: ${JSON.stringify(d)}`);
+        // Analysis result will come via SocketIO event 'analysis_result' or 'new_screenshot'
+    })
+    .catch(e => {
+        console.error('Crop image error:', e);
+        alert(`裁剪或分析出错: ${e.message}`);
+        if (analysisEl) analysisEl.textContent = `分析失败: ${e.message}`;
+    });
+}
+
+
+// Modify Socket.IO event handlers to display provider/model if received
+// In processAIMessage(messageElement, messageText, sourceEvent)
+// When creating/updating the AI message div, you can use data from messageElement.dataset
+// (This assumes backend sends provider and model_id in socket events like 'chat_stream_chunk', 'chat_stream_end', 'analysis_result')
+
+/* Example modification within processAIMessage (you'll need to adapt to your exact structure)
+function processAIMessage(messageElement, messageText, sourceEvent = "unknown") {
+    // ... your existing strongTag and contentDiv creation ...
+    let strongTag = messageElement.querySelector('strong');
+    // ...
+    const providerName = messageElement.dataset.provider || 'AI'; // Get from data attribute
+    const modelName = messageElement.dataset.modelId || '';    // Get from data attribute
+    
+    strongTag.textContent = `${providerName}${modelName ? ` (${modelName.split('/').pop()})` : ''}: `; // Display like "OpenAI (gpt-4o): "
+    // ... rest of your markdown and KaTeX rendering ...
+}
+*/
+
+// Make sure initAllFeatures is the last thing called or is wrapped in DOMContentLoaded
+document.addEventListener('DOMContentLoaded', initAllFeatures);
+
+
+function initBaseButtonHandlers() {
+    // --- Test Render Button ---
+    document.getElementById('test-render-btn')?.addEventListener('click', () => {
+        const chatHistoryEl = document.getElementById('chat-chat-history');
+        if (!chatHistoryEl) return;
+        if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+        const testMsgDiv = document.createElement('div');
+        testMsgDiv.className = 'ai-message';
+        const testMD = "### Test MD\n\n- List\n- KaTeX: $E=mc^2$ and $$\\sum_{i=0}^n i^2 = \\frac{n(n+1)(2n+1)}{6}$$";
+        processAIMessage(testMsgDiv, testMD, "test_button"); // <--- 标记来源
+        chatHistoryEl.appendChild(testMsgDiv);
+        scrollToChatBottom(chatHistoryEl);
+    });
+
+    // --- Other button handlers ---
+    document.getElementById('clear-chat-btn')?.addEventListener('click', () => {
+        const chatHistoryEl = document.getElementById('chat-chat-history');
+        if (chatHistoryEl) chatHistoryEl.innerHTML = '';
+    });
+
+    document.getElementById('copy-last-msg-btn')?.addEventListener('click', () => {
+        const lastMsg = document.querySelector('#chat-chat-history .message-content:last-child');
+        if (lastMsg) {
+            navigator.clipboard.writeText(lastMsg.textContent).then(() => {
+                console.log('[Clipboard] Copied last message');
+            }).catch(err => {
+                console.error('[Clipboard] Copy failed:', err);
+            });
+        }
+    });
+
+    document.getElementById('screenshot-btn')?.addEventListener('click', () => {
+        html2canvas(document.getElementById('chat-chat-history')).then(canvas => {
+            const link = document.createElement('a');
+            link.download = 'chat_screenshot.png';
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }).catch(err => {
+            console.error('[Screenshot] Error:', err);
+        });
+    });
+
+    // --- 保留原始的事件监听器 ---
+    document.getElementById('close-overlay')?.addEventListener('click', hideImageOverlay);
+    document.getElementById('confirm-selection')?.addEventListener('click', confirmCrop);
+    document.getElementById('cancel-selection')?.addEventListener('click', hideImageOverlay);
+}
+
+// --- sendChatMessage (Ensure it includes model selection) ---
+// function sendChatMessage() {
+//   const chatInputEl = document.getElementById('chat-chat-input');
+//   const chatHistoryEl = document.getElementById('chat-chat-history');
+
+//   if (!socket || !socket.connected) {
+//     console.error('[Chat] Socket not connected.');
+//     if (chatHistoryEl) {
+//       const errDiv = document.createElement('div');
+//       errDiv.className = 'system-message error-text';
+//       errDiv.textContent = '错误：无法连接到服务器。';
+//       chatHistoryEl.appendChild(errDiv);
+//       scrollToChatBottom(chatHistoryEl);
+//     }
+//     return;
+//   }
+
+//   if (!chatInputEl || !chatHistoryEl) {
+//     console.error("Chat UI elements missing.");
+//     return;
+//   }
+
+//   const message = chatInputEl.value.trim();
+//   const currentFileToSend = uploadedFile;
+//   let imageBase64Data = null; // For future direct paste
+
+//   if (!message && !currentFileToSend && !imageBase64Data) {
+//     debugLog("Empty message/file.");
+//     return;
+//   }
+
+//   if (!selectedModel.provider || !selectedModel.model_id) {
+//     console.warn("No model selected.");
+//     if (chatHistoryEl) {
+//       const errDiv = document.createElement('div');
+//       errDiv.className = 'system-message error-text';
+//       errDiv.textContent = '请先选择一个AI模型。';
+//       chatHistoryEl.appendChild(errDiv);
+//       scrollToChatBottom(chatHistoryEl);
+//     }
+//     return;
+//   }
+
+//   let activeSession = currentChatSessionId ? chatSessions.find(s => s.id === currentChatSessionId) : null;
+//   if (!activeSession) {
+//     const newId = Date.now();
+//     let title = message.substring(0, 25) || (currentFileToSend ? `文件: ${currentFileToSend.name.substring(0, 15)}` : '新对话');
+//     if (title.length >= 25 && message.length > 25) title += "...";
+//     activeSession = { id: newId, title: escapeHtml(title), history: [] };
+//     chatSessions.unshift(activeSession);
+
+//     if (typeof addChatHistoryItem === 'function') addChatHistoryItem(activeSession);
+//     currentChatSessionId = newId;
+//     if (typeof saveCurrentChatSessionId === 'function') saveCurrentChatSessionId();
+    
+//     const listEl = document.getElementById('chat-session-list');
+//     listEl?.querySelectorAll('.active-session').forEach(i => i.classList.remove('active-session'));
+//     listEl?.querySelector(`[data-session-id="${activeSession.id}"]`)?.classList.add('active-session');
+//     if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+//   }
+
+//   const userMessageText = message || (currentFileToSend ? `[用户上传了文件: ${currentFileToSend.name}]` : (imageBase64Data ? "[用户发送了图片]" : ""));
+//   if (activeSession && (userMessageText || currentFileToSend || imageBase64Data)) {
+//     activeSession.history.push({ role: 'user', parts: [{ text: userMessageText }] });
+//   } else if (!activeSession) {
+//     console.error("Active session null when pushing user message.");
+//     return;
+//   }
+
+//   const uDiv = document.createElement('div');
+//   uDiv.className = 'user-message';
+//   const uStrong = document.createElement('strong');
+//   uStrong.textContent = "您: ";
+//   uDiv.appendChild(uStrong);
+
+//   const uMsgContentDiv = document.createElement('div');
+//   uMsgContentDiv.className = 'message-content';
+//   if (message) uMsgContentDiv.appendChild(document.createTextNode(message));
+//   if (currentFileToSend) { /* ... append file preview to uMsgContentDiv ... */ }
+//   // TODO: Append pasted image preview to uMsgContentDiv if imageBase64Data exists
+//   uDiv.appendChild(uMsgContentDiv);
+
+//   if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
+//   chatHistoryEl.appendChild(uDiv);
+//   scrollToChatBottom(chatHistoryEl);
+
+//   const reqId = generateUUID();
+//   const thinkingDiv = document.createElement('div');
+//   thinkingDiv.className = 'ai-message ai-thinking';
+//   thinkingDiv.dataset.requestId = reqId;
+//   thinkingDiv.innerHTML = `<i class="fas fa-spinner fa-spin"></i> AI (${selectedModel.provider}/${selectedModel.model_id.split('/').pop()}) 正在思考...`;
+//   chatHistoryEl.appendChild(thinkingDiv);
+//   scrollToChatBottom(chatHistoryEl);
+
+//   if (activeSession) {
+//     activeSession.history.push({
+//       role: 'model', parts: [{ text: '' }], temp_id: reqId,
+//       provider: selectedModel.provider, model_id: selectedModel.model_id
+//     });
+//   }
+
+//   const stream = document.getElementById('streaming-toggle-checkbox')?.checked ?? true;
+//   let histToSend = activeSession ? JSON.parse(JSON.stringify(activeSession.history.slice(0, -1))) : [];
+
+//   if (currentFileToSend) {
+//     const fd = new FormData(); /* ... append data, provider, model_id ... */
+//     fd.append('prompt', message); // 用户输入的文本提示
+//     fd.append('file', currentFileToSend, currentFileToSend.name);
+//     fd.append('history', JSON.stringify(histToSend));
+//     // fd.append('use_streaming', stream); // 后端 /chat_with_file 可能不直接支持流式响应，但可以影响后续SocketIO行为
+//     fd.append('session_id', activeSession.id);
+//     fd.append('request_id', reqId);
+//     fd.append('provider', selectedModel.provider);   // <--- 传递选择的提供商
+//     fd.append('model_id', selectedModel.model_id);     // <--- 传递选择的模型ID
+
+
+//     fetch('/chat_with_file', { method: 'POST', headers: { ...(TOKEN && {'Authorization': `Bearer ${TOKEN}`}) }, body: fd })
+//         .then(r => {
+//             if (!r.ok) {
+//                 return r.json().catch(() => ({ error: `HTTP Error: ${r.status} ${r.statusText}` }))
+//                             .then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
+//             }
+//             return r.json();
+//         })
+//         .then(d => {
+//             if (d && d.request_id === reqId && d.status === 'processing') {
+//                 console.log(`[/chat_with_file] Request ${reqId} accepted by server. Waiting for Socket.IO. Model: ${selectedModel.provider}/${selectedModel.model_id}`);
+//             } else {
+//                 console.warn('[/chat_with_file] Server acknowledgment error or request_id mismatch.', d);
+//                 const currentThinkingDivMismatch = chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
+//                 if (currentThinkingDivMismatch) removeThinkingIndicator(chatHistoryEl, currentThinkingDivMismatch);
+//                 const errD = document.createElement('div');
+//                 errD.className = 'ai-message error-message';
+//                 errD.innerHTML = `<strong>系统错误:</strong><span>服务器未能确认处理文件请求。</span>`;
+//                 if (chatHistoryEl) { chatHistoryEl.appendChild(errD); scrollToChatBottom(chatHistoryEl); }
+//                 if (activeSession) { /* ... 清理历史占位符 ... */ }
+//             }
+//         })
+//         .catch(e => {
+//             console.error('[/chat_with_file] Fetch error:', e);
+//             const currentThinkingDivError = chatHistoryEl?.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
+//             if (currentThinkingDivError) removeThinkingIndicator(chatHistoryEl, currentThinkingDivError);
+//             const errD = document.createElement('div');
+//             errD.className = 'ai-message error-message';
+//             errD.innerHTML = `<strong>系统错误:</strong><span>文件上传请求失败: ${escapeHtml(e.message)}</span>`;
+//             if (chatHistoryEl) { chatHistoryEl.appendChild(errD); scrollToChatBottom(chatHistoryEl); }
+//             if (activeSession) { /* ... 清理历史占位符 ... */ }
+//         });
+//   } else {
+//     socket.emit('chat_message', {
+//       prompt: message, history: histToSend, request_id: reqId, use_streaming: stream,
+//       session_id: activeSession.id, provider: selectedModel.provider,
+//       model_id: selectedModel.model_id, image_data: imageBase64Data
+//     });
+//   }
+
+//   if (activeSession && typeof saveChatSessionsToStorage === 'function') saveChatSessionsToStorage();
+
+//   chatInputEl.value = '';
+//   const upPrevEl = document.getElementById('chat-upload-preview');
+//   if (upPrevEl) upPrevEl.innerHTML = '';
+//   uploadedFile = null;
+//   const fInEl = document.getElementById('chat-file-upload');
+//   if (fInEl) fInEl.value = '';
+// }
+
+// // DOMContentLoaded Listeners (from your original file)
+// document.addEventListener('DOMContentLoaded', initAllFeatures);
+// document.addEventListener('DOMContentLoaded', () => { 
+//   const btns = document.querySelectorAll('button, .btn, .dropdown-item'); // Updated selector
+//   btns.forEach(b => {
+//     let touchTimer;
+//     const clearTimer = () => { 
+//       if (touchTimer) { 
+//         clearTimeout(touchTimer); 
+//         touchTimer = null; 
+//         b.classList.remove('touch-active'); 
+//       }
+//     };
+//     b.addEventListener('touchstart', function() { 
+//       this.classList.add('touch-active'); 
+//       touchTimer = setTimeout(clearTimer, 300); 
+//     }, { passive: true });
+//     b.addEventListener('touchend', clearTimer); 
+//     b.addEventListener('touchcancel', clearTimer);
+//   });
+
+//   if (!document.getElementById('touch-active-style')) {
+//     const s = document.createElement('style');
+//     s.id = 'touch-active-style';
+//     s.textContent = '.touch-active { opacity:0.7 !important; transform:scale(0.98) !important; }';
+//     document.head.appendChild(s);
+//   }
+// });
 
 function sendChatMessage() {
     const chatInputEl = document.getElementById('chat-chat-input');
@@ -1664,926 +3047,3 @@ function sendChatMessage() {
     // const pastedImagePreview = document.getElementById('pasted-image-in-chat-preview');
     // if (pastedImagePreview) { pastedImagePreview.style.display = 'none'; pastedImagePreview.removeAttribute('data-image-base64'); }
 }
-// --- Image Overlay & Cropping ---
-function hideImageOverlay(){
-    const o=document.getElementById('overlay'); if(o)o.style.display='none';
-    currentImage=null; const p=document.getElementById('prompt-input'); if(p)p.value='';
-}
-function showImageOverlay(imageUrl) {
-    const overlay=document.getElementById('overlay'),imgEl=document.getElementById('overlay-image'),selBox=document.getElementById('selection-box'),cropInf=document.getElementById('crop-info');
-    if(!overlay||!imgEl||!selBox||!cropInf)return;currentImage=imageUrl;imgEl.src='';imgEl.src=`${imageUrl}?t=${Date.now()}`;overlay.style.display='flex';
-    imgEl.onload=()=>{selection={x:0,y:0,width:imgEl.width,height:imgEl.height};updateSelectionBox();initSelectionControls();cropInf.textContent='拖拽调整区域或确认全图';};
-    imgEl.onerror=()=>{alert('图片预览加载失败');hideImageOverlay();};
-}
-function updateSelectionBox(){
-    const sB=document.getElementById('selection-box'),cI=document.getElementById('crop-info'),iE=document.getElementById('overlay-image');if(!sB||!cI||!iE||!iE.width||!iE.naturalWidth)return;selection.x=Math.max(0,Math.min(selection.x,iE.width));selection.y=Math.max(0,Math.min(selection.y,iE.height));selection.width=Math.max(10,Math.min(selection.width,iE.width-selection.x));selection.height=Math.max(10,Math.min(selection.height,iE.height-selection.y));sB.style.left=`${selection.x}px`;sB.style.top=`${selection.y}px`;sB.style.width=`${selection.width}px`;sB.style.height=`${selection.height}px`;const sX_=iE.naturalWidth/iE.width,sY_=iE.naturalHeight/iE.height;cI.textContent=`选择(原图):${Math.round(selection.x*sX_)},${Math.round(selection.y*sY_)}, ${Math.round(selection.width*sX_)}x${Math.round(selection.height*sY_)}`;
-}
-// function confirmCrop() {
-//     if (!currentImage) { alert('错误：没有当前图片。'); return; } const overlayImageEl = document.getElementById('overlay-image');
-//     if (!overlayImageEl || !overlayImageEl.naturalWidth) { alert('错误：图片未加载。'); return; }
-//     const scaleX = overlayImageEl.naturalWidth / overlayImageEl.width; const scaleY = overlayImageEl.naturalHeight / overlayImageEl.height;
-//     const oSel = { x: Math.round(selection.x*scaleX), y: Math.round(selection.y*scaleY), width: Math.round(selection.width*scaleX), height: Math.round(selection.height*scaleY) };
-//     const fd = new FormData(); fd.append('image_url', currentImage); fd.append('x', oSel.x); fd.append('y', oSel.y); fd.append('width', oSel.width); fd.append('height', oSel.height);
-//     const prmptEl = document.getElementById('prompt-input'); if (prmptEl?.value.trim()) fd.append('prompt', prmptEl.value.trim());
-//     const analysisEl = document.getElementById('ss-ai-analysis'); if (analysisEl) analysisEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 分析中...';
-//     hideImageOverlay();
-//     fetch('/crop_image', { method: 'POST', headers:{'Authorization':`Bearer ${TOKEN}`}, body:fd })
-//     .then(r=>{if(!r.ok)return r.json().catch(()=>({error:`HTTP ${r.status}`})).then(eD=>{throw new Error(eD.message||eD.error||`HTTP ${r.status}`)});return r.json()})
-//     .then(d=>debugLog(`Crop ack: ${JSON.stringify(d)}`))
-//     .catch(e=>{console.error('Crop error:',e);alert(`裁剪出错: ${e.message}`);if(analysisEl)analysisEl.textContent=`分析失败: ${e.message}`;});
-// }
-function initSelectionControls(){/* ... (selection controls logic as provided in original user file, ensure it's complete) ... */
-    const sb=document.getElementById('selection-box'),oi=document.getElementById('overlay-image');if(!sb||!oi)return;let sx_s,sy_s,isx_s,isy_s,isr_s;function hs(e){e.preventDefault();isDragging=true;const tE=e.type.startsWith('touch'),cX=tE?e.touches[0].clientX:e.clientX,cY=tE?e.touches[0].clientY:e.clientY,iR=oi.getBoundingClientRect();sx_s=cX-iR.left;sy_s=cY-iR.top;isx_s=cX;isy_s=cY;isr_s={...selection};const br=sb.getBoundingClientRect(),rx=cX-br.left,ry=cY-br.top,et=15;dragType=rx>=isr_s.width-et&&ry>=isr_s.height-et?'resize-se':sx_s>=isr_s.x&&sx_s<=isr_s.x+isr_s.width&&sy_s>=isr_s.y&&sy_s<=isr_s.y+isr_s.height?'move':(dragType='draw',selection={x:sx_s,y:sy_s,width:0,height:0},updateSelectionBox(),undefined);if(!isDragging&&dragType!='draw')return;if(tE){document.addEventListener('touchmove',hm,{passive:false});document.addEventListener('touchend',he);document.addEventListener('touchcancel',he);}else{document.addEventListener('mousemove',hm);document.addEventListener('mouseup',he);}}function hm(e){if(!isDragging)return;e.preventDefault();const tE=e.type.startsWith('touch'),cX=tE?e.touches[0].clientX:e.clientX,cY=tE?e.touches[0].clientY:e.clientY,iR=oi.getBoundingClientRect(),currXimg=cX-iR.left,currYimg=cY-iR.top,dcx=cX-isx_s,dcy=cY-isy_s;if(dragType==='move'){selection.x=isr_s.x+dcx;selection.y=isr_s.y+dcy;}else if(dragType==='resize-se'){selection.width=isr_s.width+dcx;selection.height=isr_s.height+dcy;}else if(dragType==='draw'){selection.width=currXimg-selection.x;selection.height=currYimg-selection.y;if(selection.width<0){selection.x=currXimg;selection.width=-selection.width;}if(selection.height<0){selection.y=currYimg;selection.height=-selection.height;}}updateSelectionBox();}function he(){if(!isDragging)return;isDragging=false;dragType='';document.removeEventListener('mousemove',hm);document.removeEventListener('mouseup',he);document.removeEventListener('touchmove',hm,{passive:false});document.removeEventListener('touchend',he);document.removeEventListener('touchcancel',he);}oi.replaceWith(oi.cloneNode(true));document.getElementById('overlay-image').addEventListener('mousedown',hs);document.getElementById('overlay-image').addEventListener('touchstart',hs,{passive:false});sb.replaceWith(sb.cloneNode(true));document.getElementById('selection-box').addEventListener('mousedown',hs);document.getElementById('selection-box').addEventListener('touchstart',hs,{passive:false});const nsb=document.getElementById('selection-box');if('ontouchstart'in window&&!nsb.querySelector('.resize-handle-se')){const rh=document.createElement('div');rh.className='resize-handle resize-handle-se';nsb.appendChild(rh);}}
-
-// --- History & UI Update Functions ---
-// 修改后的 addHistoryItem (用于截图历史记录显示)
-function addHistoryItem(item) {
-    const historyListEl = document.getElementById('ss-history-list');
-    if (!historyListEl || !item || !item.image_url) {
-        console.warn("Cannot add screenshot history item, list element or item data missing.", item);
-        return;
-    }
-
-    if (historyListEl.querySelector(`li[data-url="${item.image_url}"]`)) {
-        console.log(`Screenshot history item for ${item.image_url} already exists. Updating analysis if newer.`);
-        const existingLi = historyListEl.querySelector(`li[data-url="${item.image_url}"]`);
-        if (existingLi && typeof item.analysis === 'string' && existingLi.dataset.analysis !== item.analysis) {
-            existingLi.dataset.analysis = item.analysis;
-            const mainAnalysisEl = document.getElementById('ss-ai-analysis');
-            if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === item.image_url) {
-                mainAnalysisEl.innerHTML = '';
-                const analysisContentDiv = document.createElement('div');
-                analysisContentDiv.className = 'message-content';
-                if (typeof processAIMessage === 'function') {
-                    const tempAiMessageDiv = document.createElement('div');
-                    tempAiMessageDiv.className = 'ai-message';
-                    tempAiMessageDiv.dataset.provider = item.provider || 'AI';
-                    processAIMessage(tempAiMessageDiv, item.analysis, 'history_item_analysis_update');
-                    while (tempAiMessageDiv.firstChild) {
-                        analysisContentDiv.appendChild(tempAiMessageDiv.firstChild);
-                    }
-                } else {
-                    analysisContentDiv.textContent = item.analysis || '(processAIMessage 未定义)';
-                }
-                mainAnalysisEl.appendChild(analysisContentDiv);
-            }
-        }
-        return;
-    }
-
-    const li = document.createElement('li');
-    li.className = 'history-item';
-    li.setAttribute('data-url', item.image_url);
-    li.dataset.analysis = item.analysis || '';
-    li.dataset.prompt = item.prompt || 'Describe this screenshot and highlight anything unusual.';
-    li.dataset.timestamp = String(item.timestamp || (Date.now() / 1000));
-    li.dataset.provider = item.provider || 'unknown';
-
-    const contentWrapper = document.createElement('div');
-    contentWrapper.className = 'history-item-content-wrapper';
-
-    const img = document.createElement('img');
-    img.src = item.image_url + '?t=' + Date.now();
-    img.alt = '历史截图缩略图';
-    img.loading = 'lazy';
-    const timestampDivForError = document.createElement('div');
-
-    img.onerror = () => {
-        const errorDiv = document.createElement('div');
-        errorDiv.className = 'history-error';
-        errorDiv.textContent = '图片加载失败';
-        if (img.parentNode) {
-            img.parentNode.replaceChild(errorDiv, img);
-        } else {
-            li.insertBefore(errorDiv, timestampDivForError);
-        }
-    };
-
-    const timestampDiv = timestampDivForError;
-    timestampDiv.className = 'history-item-text';
-    const date = new Date(parseFloat(li.dataset.timestamp) * 1000);
-    timestampDiv.textContent = date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
-    timestampDiv.title = date.toLocaleString();
-
-    contentWrapper.appendChild(img);
-    contentWrapper.appendChild(timestampDiv);
-
-    const actionsContainer = document.createElement('div');
-    actionsContainer.className = 'history-item-actions';
-
-    if (typeof createDeleteButton === 'function') {
-        const deleteBtn = createDeleteButton(() => {
-            if (confirm('确定要删除此截图记录及其分析吗?')) {
-                if (typeof clearMainScreenshotDisplay === 'function') {
-                    const mainAnalysisEl = document.getElementById('ss-ai-analysis');
-                    if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === item.image_url) {
-                        clearMainScreenshotDisplay();
-                    }
-                }
-                li.remove();
-                console.log(`Screenshot history item ${item.image_url} deleted.`);
-            }
-        });
-        actionsContainer.appendChild(deleteBtn);
-    }
-
-    li.appendChild(contentWrapper);
-    li.appendChild(actionsContainer);
-
-    li.addEventListener('click', (e) => {
-        if (e.target.closest('.history-item-actions')) {
-            return;
-        }
-
-        const mainAnalysisEl = document.getElementById('ss-ai-analysis');
-        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
-        const cropCurrentBtn = document.getElementById('ss-crop-current-btn');
-
-        if (mainAnalysisEl) {
-            mainAnalysisEl.innerHTML = '';
-            const analysisContentDiv = document.createElement('div');
-            analysisContentDiv.className = 'message-content';
-            const analysisText = li.dataset.analysis || '此截图没有分析结果。';
-            const analysisProvider = li.dataset.provider || 'AI';
-            const tempAiMessageDiv = document.createElement('div');
-            tempAiMessageDiv.className = 'ai-message';
-            tempAiMessageDiv.dataset.provider = analysisProvider;
-            if (typeof processAIMessage === 'function') {
-                processAIMessage(tempAiMessageDiv, analysisText, 'history_click_ss_analysis');
-                while (tempAiMessageDiv.firstChild) {
-                    analysisContentDiv.appendChild(tempAiMessageDiv.firstChild);
-                }
-            } else {
-                analysisContentDiv.textContent = analysisText + " (processAIMessage 未定义)";
-            }
-            mainAnalysisEl.appendChild(analysisContentDiv);
-            mainAnalysisEl.dataset.sourceUrl = item.image_url;
-        }
-
-        if (mainImagePreviewEl) {
-            mainImagePreviewEl.src = item.image_url + '?t=' + Date.now();
-            mainImagePreviewEl.alt = `截图预览 - ${new Date(parseFloat(li.dataset.timestamp) * 1000).toLocaleString()}`;
-            mainImagePreviewEl.style.display = 'block';
-            mainImagePreviewEl.dataset.currentUrl = item.image_url;
-            if (cropCurrentBtn) cropCurrentBtn.style.display = 'inline-block';
-        } else {
-            if (cropCurrentBtn) cropCurrentBtn.style.display = 'none';
-        }
-
-        const currentActive = historyListEl.querySelector('.active-screenshot-item');
-        if (currentActive) currentActive.classList.remove('active-screenshot-item');
-        li.classList.add('active-screenshot-item');
-    });
-
-    historyListEl.insertBefore(li, historyListEl.firstChild);
-}
-
-
-// --- 辅助函数：清空主截图显示区 ---
-function clearMainScreenshotDisplay() {
-    const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
-    const mainAnalysisEl = document.getElementById('ss-ai-analysis');
-    const cropCurrentBtn = document.getElementById('ss-crop-current-btn');
-
-    if (mainImagePreviewEl) {
-        mainImagePreviewEl.src = '#';
-        mainImagePreviewEl.style.display = 'none';
-        mainImagePreviewEl.removeAttribute('data-current-url');
-    }
-    if (mainAnalysisEl) {
-        mainAnalysisEl.textContent = '请在左侧点击历史记录查看分析结果，或点击“发起截屏”进行分析。';
-        mainAnalysisEl.removeAttribute('data-source-url');
-    }
-    if (cropCurrentBtn) {
-        cropCurrentBtn.style.display = 'none';
-    }
-    const historyListEl = document.getElementById('ss-history-list');
-    const currentActive = historyListEl?.querySelector('.active-screenshot-item');
-    if (currentActive) {
-        currentActive.classList.remove('active-screenshot-item');
-    }
-}
-
-// --- 初始化截图分析相关的按钮和事件 ---
-function initScreenshotAnalysisHandlers() {
-    // “发起截屏”按钮
-    document.getElementById('ss-capture-btn')?.addEventListener('click', () => {
-        if (typeof requestScreenshot === 'function') {
-            requestScreenshot();
-            // 点击发起截屏后，可以考虑清空主显示区或显示等待信息
-            const analysisEl = document.getElementById('ss-ai-analysis');
-            if (analysisEl) {
-                analysisEl.innerHTML = '<p><i class="fas fa-spinner fa-spin"></i> 等待截屏和分析中...</p>';
-            }
-            const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
-            if (mainImagePreviewEl) mainImagePreviewEl.style.display = 'none';
-            const cropBtn = document.getElementById('ss-crop-current-btn');
-            if (cropBtn) cropBtn.style.display = 'none';
-
-        } else {
-            console.error("requestScreenshot function is not defined.");
-        }
-    });
-
-    // “清空截图历史”按钮
-    document.getElementById('ss-clear-history')?.addEventListener('click', () => {
-        if(confirm('确定要清空所有截图历史记录吗？')) {
-            const historyListEl = document.getElementById('ss-history-list');
-            if (historyListEl) historyListEl.innerHTML = '';
-            if (typeof clearMainScreenshotDisplay === 'function') {
-                clearMainScreenshotDisplay();
-            }
-        }
-    });
-
-    // 主预览区旁的“裁剪此图”按钮
-    document.getElementById('ss-crop-current-btn')?.addEventListener('click', () => {
-        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
-        const imageUrlToCrop = mainImagePreviewEl ? mainImagePreviewEl.dataset.currentUrl : null;
-
-        if (imageUrlToCrop) {
-            console.log(`[CROP] Crop button clicked for image: ${imageUrlToCrop}`);
-            if (typeof showImageOverlay === 'function') {
-                showImageOverlay(imageUrlToCrop);
-            } else {
-                console.error("showImageOverlay function is not defined.");
-            }
-        } else {
-            alert("没有当前显示的图片可供裁剪。请先从历史记录中选择一张图片。");
-            console.warn("[CROP] Crop button clicked, but no current image URL found in main preview.");
-        }
-    });
-
-    // (可选) 关闭覆盖层的按钮事件，确保它们调用 hideImageOverlay
-    document.getElementById('close-overlay')?.addEventListener('click', () => {
-        if (typeof hideImageOverlay === 'function') hideImageOverlay();
-    });
-    document.getElementById('cancel-selection')?.addEventListener('click', () => {
-        if (typeof hideImageOverlay === 'function') hideImageOverlay();
-    });
-    // “确认裁剪并分析”按钮的事件监听器应该在 `initBaseButtonHandlers` 或类似地方，因为它调用 `confirmCrop`
-    // document.getElementById('confirm-selection')?.addEventListener('click', confirmCrop); 
-    // ^^^ 这个应该已经在 initBaseButtonHandlers 或类似的地方了
-}
-
-
-
-
-// 修改后的 addChatHistoryItem (AI 对话历史)
-function addChatHistoryItem(session) {
-    const historyListEl = document.getElementById('chat-session-list');
-    if (!historyListEl || !session || !session.id) {
-        console.warn("Cannot add chat session item, list or session data missing.", session);
-        return;
-    }
-
-    const existingLi = historyListEl.querySelector(`li[data-session-id="${session.id}"]`);
-    if (existingLi) existingLi.remove();
-
-    const li = document.createElement('li');
-    li.className = 'history-item chat-history-item';
-    li.setAttribute('data-session-id', String(session.id));
-
-    const contentWrapper = document.createElement('div');
-    contentWrapper.className = 'history-item-content-wrapper';
-
-    const titleText = session.title || '无标题对话';
-    const timestamp = new Date(session.id).toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
-
-    const titleDiv = document.createElement('div');
-    titleDiv.title = escapeHtml(titleText);
-    titleDiv.style.fontWeight = '500';
-    titleDiv.style.whiteSpace = 'nowrap';
-    titleDiv.style.overflow = 'hidden';
-    titleDiv.style.textOverflow = 'ellipsis';
-    titleDiv.innerHTML = `<i class="fas fa-comment"></i> ${escapeHtml(titleText)}`;
-
-    const timeDiv = document.createElement('div');
-    timeDiv.style.fontSize = '0.75em';
-    timeDiv.style.color = '#666';
-    timeDiv.textContent = timestamp;
-
-    contentWrapper.appendChild(titleDiv);
-    contentWrapper.appendChild(timeDiv);
-
-    const actionsContainer = document.createElement('div');
-    actionsContainer.className = 'history-item-actions';
-
-    if (typeof createDeleteButton === 'function') {
-        const deleteBtn = createDeleteButton(() => {
-            if (confirm(`确定要删除对话 \"${escapeHtml(titleText)}\"?`)) {
-                chatSessions = chatSessions.filter(s => s.id !== session.id);
-                li.remove();
-                if (currentChatSessionId === session.id && typeof clearCurrentChatDisplay === 'function') {
-                    clearCurrentChatDisplay();
-                }
-                if (typeof saveChatSessionsToStorage === 'function') saveChatSessionsToStorage();
-            }
-        });
-        actionsContainer.appendChild(deleteBtn);
-    }
-
-    li.appendChild(contentWrapper);
-    li.appendChild(actionsContainer);
-
-    li.addEventListener('click', (e) => {
-        if (e.target.closest('.history-item-actions')) return;
-
-        const sessionId = Number(li.getAttribute('data-session-id'));
-        const clickedSession = chatSessions.find(s => s.id === sessionId);
-        if (clickedSession) {
-            currentChatSessionId = clickedSession.id;
-            if (typeof renderChatHistory === 'function') renderChatHistory(clickedSession.history);
-
-            historyListEl.querySelectorAll('.history-item.active-session').forEach(item => item.classList.remove('active-session'));
-            li.classList.add('active-session');
-
-            document.getElementById('chat-chat-input')?.focus();
-            if (typeof saveCurrentChatSessionId === 'function') saveCurrentChatSessionId();
-        }
-    });
-
-    historyListEl.insertBefore(li, historyListEl.firstChild);
-}
-
-// 修改后的 addVoiceHistoryItem (语音历史记录)
-function addVoiceHistoryItem(item) {
-    const voiceHistoryListEl = document.getElementById('voice-history-list');
-    if (!voiceHistoryListEl || !item) {
-        console.warn("Cannot add voice history item, list or item data missing.", item);
-        return;
-    }
-
-    const li = document.createElement('li');
-    li.className = 'history-item voice-history-item';
-    li.dataset.transcript = item.transcript || '无法识别';
-    li.dataset.response = item.response || '无回答';
-    const timestampForStorage = Date.now();
-    li.dataset.timestamp = String(timestampForStorage / 1000);
-
-    const contentWrapper = document.createElement('div');
-    contentWrapper.className = 'history-item-content-wrapper';
-
-    const timestamp = new Date(timestampForStorage).toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
-    const transcript = item.transcript || '无法识别';
-    const transcriptDisplay = transcript.length > 30 ? transcript.substring(0, 27) + '...' : transcript;
-
-    const timeDivVoice = document.createElement('div');
-    timeDivVoice.innerHTML = `<strong><i class="fas fa-clock"></i> ${timestamp}</strong>`;
-
-    const transcriptDivVoice = document.createElement('div');
-    transcriptDivVoice.title = escapeHtml(transcript);
-    transcriptDivVoice.innerHTML = `<i class="fas fa-comment-dots"></i> ${escapeHtml(transcriptDisplay)}`;
-
-    contentWrapper.appendChild(timeDivVoice);
-    contentWrapper.appendChild(transcriptDivVoice);
-
-    const actionsContainer = document.createElement('div');
-    actionsContainer.className = 'history-item-actions';
-
-    if (typeof createDeleteButton === 'function') {
-        const deleteBtn = createDeleteButton(() => {
-            if (confirm('确定要删除此语音记录吗?')) {
-                li.remove();
-                const voiceResultEl = document.getElementById('voice-result');
-                if (voiceResultEl && voiceResultEl.dataset.associatedTimestamp === String(timestampForStorage)) {
-                    voiceResultEl.innerHTML = '点击下方按钮开始录音，识别结果和 AI 回答将显示在此处。';
-                    delete voiceResultEl.dataset.associatedTimestamp;
-                }
-            }
-        });
-        actionsContainer.appendChild(deleteBtn);
-    }
-
-    li.appendChild(contentWrapper);
-    li.appendChild(actionsContainer);
-
-    li.addEventListener('click', (e) => {
-        if (e.target.closest('.history-item-actions')) return;
-
-        const voiceResultEl = document.getElementById('voice-result');
-        if (voiceResultEl) {
-            voiceResultEl.innerHTML = '';
-            voiceResultEl.dataset.associatedTimestamp = String(timestampForStorage);
-
-            const stashedTranscript = li.dataset.transcript;
-            const stashedResponse = li.dataset.response;
-
-            const transcriptHtml = `<div style="margin-bottom:0.5rem;"><strong><i class="fas fa-comment-dots"></i> 识别结果:</strong><div class="message-content-simple">${escapeHtml(stashedTranscript)}</div></div>`;
-
-            const aiResponseContainer = document.createElement('div');
-            aiResponseContainer.innerHTML = `<strong><i class="fas fa-robot"></i> AI回答:</strong>`;
-
-            const aiMessageDiv = document.createElement('div');
-            aiMessageDiv.className = 'ai-message';
-            if (typeof processAIMessage === 'function') {
-                processAIMessage(aiMessageDiv, stashedResponse, 'voice_history_click');
-            } else {
-                aiMessageDiv.textContent = stashedResponse + " (processAIMessage 未定义)";
-            }
-            aiResponseContainer.appendChild(aiMessageDiv);
-
-            voiceResultEl.innerHTML = transcriptHtml + '<hr>';
-            voiceResultEl.appendChild(aiResponseContainer);
-        }
-
-        voiceHistoryListEl.querySelectorAll('.history-item.active-session').forEach(i => i.classList.remove('active-session'));
-        li.classList.add('active-session');
-    });
-
-    voiceHistoryListEl.insertBefore(li, voiceHistoryListEl.firstChild);
-}
-
-function createDeleteButton(onClickCallback) { const btn=document.createElement('button');btn.className='delete-history';btn.innerHTML='<i class="fas fa-times"></i>';btn.title='删除';btn.type='button';btn.onclick=e=>{e.stopPropagation();onClickCallback();};return btn; }
-function renderChatHistory(historyArray) { /* ... (render chat history, use processAIMessage for model turns) ... */
-    const chatHistoryEl=document.getElementById('chat-chat-history');
-    if(!chatHistoryEl)return;
-    chatHistoryEl.innerHTML='';
-    if(!historyArray||historyArray.length===0){ chatHistoryEl.innerHTML='<div class="system-message">对话为空...</div>'; return; }
-    historyArray.forEach(turn=>{
-        if (!turn || !turn.role || !turn.parts || !turn.parts[0]) return;
-        const role=turn.role; const text=(turn.parts?.[0]?.text)||"";
-        const msgDiv=document.createElement('div');
-        // Strong tag and contentDiv will be handled by processAIMessage for AI, or created directly for user
-        if(role==='user'){
-            msgDiv.className='user-message';
-            const strongTag=document.createElement('strong'); strongTag.textContent="您: "; msgDiv.appendChild(strongTag);
-            const contentDiv=document.createElement('div'); contentDiv.className='message-content';
-            contentDiv.textContent = text; // User messages are plain text
-            const fileMatch = text.match(/\[用户上传了文件: (.*?)\]/);
-            if (fileMatch && fileMatch[1]) {
-                contentDiv.textContent = text.replace(fileMatch[0], '').trim();
-                const fileInfo = document.createElement('div'); fileInfo.className = 'attached-file';
-                fileInfo.innerHTML = `<i class="fas fa-paperclip"></i> (文件: ${escapeHtml(fileMatch[1])})`;
-                if (contentDiv.textContent) contentDiv.appendChild(document.createElement('br'));
-                contentDiv.appendChild(fileInfo);
-            }
-            msgDiv.appendChild(contentDiv);
-        } else if(role==='model'){
-            msgDiv.className='ai-message';
-            // processAIMessage will add the strong tag and contentDiv internally
-            processAIMessage(msgDiv, text, "history_load"); // <--- 标记来源
-        } else { 
-            msgDiv.className='system-message'; // Or some other class
-            const strongTag=document.createElement('strong'); strongTag.textContent = `${role}: `; msgDiv.appendChild(strongTag);
-            const contentDiv=document.createElement('div'); contentDiv.className='message-content';
-            contentDiv.textContent = text;
-            msgDiv.appendChild(contentDiv);
-        }
-        chatHistoryEl.appendChild(msgDiv);
-    });
-    scrollToChatBottom(chatHistoryEl);
-}
-function updateConnectionStatus(isConnected){const ind=document.getElementById('connection-indicator'),st=document.getElementById('connection-status');if(ind&&st){ind.className=`status-indicator ${isConnected?'connected':'disconnected'}`;st.textContent=`实时连接: ${isConnected?'已连接':'未连接'}`;ind.title=`Socket.IO ${isConnected?'Connected':'Disconnected'}`;}}
-function updateApiInfo(d){const el=document.getElementById('api-provider');if(el){el.textContent=`AI模型: ${d?.provider||'未知'}`;el.title=d?.provider?`Using ${d.provider}`:'AI Provider Info Unavailable';}}
-function clearScreenshotHistory(){if(confirm('清空所有截图历史?')){const el=document.getElementById('ss-history-list');if(el)el.innerHTML='';const anEl=document.getElementById('ss-ai-analysis');if(anEl){anEl.textContent='点击历史查看分析...';delete anEl.dataset.sourceUrl;}}}
-function clearCurrentChatDisplay(){const el=document.getElementById('chat-chat-history');if(el)el.innerHTML='<div class="system-message">选择记录或开始新对话...</div>';currentChatSessionId=null;document.getElementById('chat-session-list')?.querySelectorAll('.active-session').forEach(i=>i.classList.remove('active-session'));document.getElementById('chat-chat-input')?.focus(); saveCurrentChatSessionId();}
-function clearAllChatSessions(){if(confirm('永久删除所有对话?')){chatSessions=[];currentChatSessionId=null;const el=document.getElementById('chat-session-list');if(el)el.innerHTML='';clearCurrentChatDisplay();saveChatSessionsToStorage();saveCurrentChatSessionId();}}
-function clearVoiceHistory(){if(confirm('清空所有语音历史?')){const el=document.getElementById('voice-history-list');if(el)el.innerHTML='';const resEl=document.getElementById('voice-result');if(resEl)resEl.textContent='点击开始录音...';}}
-
-// --- API & Server Communication ---
-function getApiInfo() {
-    if (!TOKEN) { updateApiInfo({ provider: '未知 (Token未设置)' }); return; }
-    fetch('/api_info', { headers: { 'Authorization': `Bearer ${TOKEN}` } })
-    .then(r=>{if(r.status===401)throw new Error('Unauthorized');if(!r.ok)throw new Error(`API信息获取失败(${r.status})`);return r.json();})
-    .then(updateApiInfo).catch(e=>{console.error('API info error:',e);updateApiInfo({provider:`错误(${e.message})`});});
-}
-function sendVoiceToServer(audioBlob) {
-    const fd = new FormData();
-    const timestamp = Date.now();
-    // 后端会根据上传的文件名和内容确定格式，这里的文件名主要是为了 FormData
-    fd.append('audio', audioBlob, `recorded_audio_${timestamp}.wav`); 
-
-    const requestIdForThisOperation = window.currentVoiceRequestId; // 获取当前操作的ID
-
-    // 1. 检查并添加 request_id
-    if (requestIdForThisOperation) {
-        fd.append('request_id', requestIdForThisOperation);
-        console.log('[VOICE] Sending voice to /process_voice with client-generated request_id:', requestIdForThisOperation);
-    } else {
-        console.error("[VOICE] CRITICAL: window.currentVoiceRequestId was NOT SET when sendVoiceToServer was called! Aborting send.");
-        const voiceResultEl = document.getElementById('voice-result');
-        if(voiceResultEl) voiceResultEl.innerHTML = '<p class="error-message">内部错误：请求ID丢失，无法发送语音。请重试。</p>';
-        // 重新启用开始录音按钮，禁用停止按钮
-        const startBtn = document.getElementById('voice-start-recording');
-        const stopBtn = document.getElementById('voice-stop-recording');
-        if(startBtn) startBtn.disabled = false;
-        if(stopBtn) stopBtn.disabled = true;
-        return; // 中止发送
-    }
-
-    // 2. 添加 socket_id (可选，用于后端尝试定向发送 Socket.IO 事件)
-    if (socket && socket.id) {
-        fd.append('socket_id', socket.id);
-        // console.log('[VOICE] Sending with socket_id:', socket.id); // 日志可选
-    } else {
-        console.warn('[VOICE] Socket not available or socket.id is missing when sending voice. Backend will likely broadcast Socket.IO events.');
-    }
-    
-    // 3. 更新UI为“处理中...”状态
-    const voiceResultEl = document.getElementById('voice-result');
-    const startRecordingBtn = document.getElementById('voice-start-recording');
-    const stopRecordingBtn = document.getElementById('voice-stop-recording');
-
-    if (voiceResultEl) {
-        const displayRequestId = (requestIdForThisOperation || 'N/A').substring(0, 8);
-        voiceResultEl.innerHTML = `<p><i class="fas fa-spinner fa-spin"></i> 处理中... (ID: ${displayRequestId})</p>`;
-    }
-    // 按钮状态：开始录音禁用（因为正在处理），停止录音禁用（因为已停止）
-    if (startRecordingBtn) startRecordingBtn.disabled = true;
-    if (stopRecordingBtn) stopRecordingBtn.disabled = true;
-
-
-    // 4. 发送 fetch 请求到后端 /process_voice
-    fetch('/process_voice', { 
-        method: 'POST', 
-        body: fd, 
-        headers: { 
-            ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` }) 
-        }
-    })
-    .then(response => {
-        if (!response.ok) {
-            return response.json().catch(() => ({ 
-                message: `语音请求失败，服务器状态: ${response.status} ${response.statusText}` 
-            })).then(errorData => {
-                throw new Error(errorData.message || JSON.stringify(errorData));
-            });
-        }
-        return response.json();
-    })
-    .then(data => {
-        console.log('[AI DEBUG] Voice ack from /process_voice:', data); 
-        if (data.status === 'processing' && data.request_id) {
-            // 确认后端返回的 request_id 与我们发送的一致
-            if (data.request_id !== requestIdForThisOperation) {
-                console.warn(`[VOICE] MISMATCH in HTTP ACK! Client sent ${requestIdForThisOperation}, server ACK'd for ${data.request_id}. This indicates a server-side issue if it's not using the provided ID. Subsequent Socket.IO events might not match.`);
-                // 理论上，如果后端正确使用了前端提供的ID，这里不应该出现mismatch。
-                // 如果出现，需要检查后端 /process_voice 路由获取 request_id 的逻辑。
-            } else {
-                console.log(`[VOICE] HTTP ACK matches sent request_id: ${data.request_id}. Waiting for Socket.IO events.`);
-            }
-            // UI 已经是“处理中...”，按钮状态也已设置。等待 Socket.IO 事件来更新最终结果或错误。
-        } else {
-            const errorMessage = data.message || data.error || '语音请求未被正确处理。';
-            console.error('[VOICE] Voice processing initiation failed on server (non-202 or missing processing status):', errorMessage);
-            if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">语音处理启动失败: ${escapeHtml(errorMessage)}</p>`;
-            if (startRecordingBtn) startRecordingBtn.disabled = false;
-            if (stopRecordingBtn) stopRecordingBtn.disabled = true;
-            window.currentVoiceRequestId = null; // 清理ID，允许新的操作
-        }
-    })
-    .catch(error => {
-        console.error('[VOICE] Error sending voice or handling server ack:', error);
-        if (voiceResultEl) {
-            voiceResultEl.innerHTML = `<p class="error-message">语音请求发送失败: ${escapeHtml(error.message)}</p>`;
-        }
-        if (startRecordingBtn) startRecordingBtn.disabled = false;
-        if (stopRecordingBtn) stopRecordingBtn.disabled = true;
-        window.currentVoiceRequestId = null; // 出错时清理ID，允许新的操作
-    });
-}
-function requestScreenshot(){if(socket?.connected)socket.emit('request_screenshot_capture');else alert('无法请求截图：未连接');}
-
-// --- Initialization Functions for Features & Event Handlers ---
-function initBaseButtonHandlers() {
-    // --- Test Render Button ---
-    document.getElementById('test-render-btn')?.addEventListener('click', () => {
-        const chatHistoryEl = document.getElementById('chat-chat-history');
-        if (!chatHistoryEl) return;
-        if (chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
-        const testMsgDiv = document.createElement('div');
-        testMsgDiv.className = 'ai-message';
-        const testMD = "### Test MD\n\n- List\n- KaTeX: $E=mc^2$ and $$\\sum_{i=0}^n i^2 = \\frac{n(n+1)(2n+1)}{6}$$";
-        processAIMessage(testMsgDiv, testMD, "test_button"); // <--- 标记来源
-        chatHistoryEl.appendChild(testMsgDiv);
-        scrollToChatBottom(chatHistoryEl);
-    });
-
-    // --- Other button handlers ---
-    document.getElementById('clear-chat-btn')?.addEventListener('click', () => {
-        const chatHistoryEl = document.getElementById('chat-chat-history');
-        if (chatHistoryEl) chatHistoryEl.innerHTML = '';
-    });
-
-    document.getElementById('copy-last-msg-btn')?.addEventListener('click', () => {
-        const lastMsg = document.querySelector('#chat-chat-history .message-content:last-child');
-        if (lastMsg) {
-            navigator.clipboard.writeText(lastMsg.textContent).then(() => {
-                console.log('[Clipboard] Copied last message');
-            }).catch(err => {
-                console.error('[Clipboard] Copy failed:', err);
-            });
-        }
-    });
-
-    document.getElementById('screenshot-btn')?.addEventListener('click', () => {
-        html2canvas(document.getElementById('chat-chat-history')).then(canvas => {
-            const link = document.createElement('a');
-            link.download = 'chat_screenshot.png';
-            link.href = canvas.toDataURL('image/png');
-            link.click();
-        }).catch(err => {
-            console.error('[Screenshot] Error:', err);
-        });
-    });
-
-    // --- 保留原始的事件监听器 ---
-    document.getElementById('close-overlay')?.addEventListener('click', hideImageOverlay);
-    document.getElementById('confirm-selection')?.addEventListener('click', confirmCrop);
-    document.getElementById('cancel-selection')?.addEventListener('click', hideImageOverlay);
-}
-function initTabs(){
-    const c=document.querySelector('.tabs-container'),s=document.querySelectorAll('.tab-content-wrapper > .tab-content');if(!c||s.length===0)return;c.addEventListener('click',e=>{const t=e.target.closest('.tab-item');if(!t||t.classList.contains('active'))return;const id=t.dataset.tab,tc=document.getElementById(id);if(tc){c.querySelectorAll('.active').forEach(x=>x.classList.remove('active'));s.forEach(x=>x.classList.remove('active'));t.classList.add('active');tc.classList.add('active');if(id==='ai-chat')document.getElementById('chat-chat-input')?.focus();}});const aT=c.querySelector('.tab-item.active')||c.querySelector('.tab-item');if(aT){aT.classList.add('active');const activeTabContent = document.getElementById(aT.dataset.tab); if(activeTabContent) activeTabContent.classList.add('active'); if(aT.dataset.tab === 'ai-chat')document.getElementById('chat-chat-input')?.focus();}
-}
-// function initScreenshotAnalysisHandlers(){
-//     document.getElementById('ss-capture-btn')?.addEventListener('click', requestScreenshot);
-//     document.getElementById('ss-clear-history')?.addEventListener('click', clearScreenshotHistory);
-// }
-function initAiChatHandlers() {
-    document.getElementById('chat-send-chat')?.addEventListener('click', sendChatMessage);
-    document.getElementById('chat-chat-input')?.addEventListener('keypress', (e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChatMessage();}});
-    document.getElementById('chat-file-upload')?.addEventListener('change', handleFileUpload);
-    document.getElementById('chat-clear-current-chat')?.addEventListener('click', clearCurrentChatDisplay);
-    document.getElementById('chat-clear-all-sessions')?.addEventListener('click', clearAllChatSessions);
-    loadChatSessionsFromStorage();
-    const streamingToggle = document.getElementById('streaming-toggle-checkbox');
-    if (streamingToggle) {
-        const saved = localStorage.getItem('useStreamingOutput');
-        streamingToggle.checked = saved !== null ? saved === 'true' : true;
-        if(saved === null) localStorage.setItem('useStreamingOutput', 'true');
-        streamingToggle.addEventListener('change', function(){localStorage.setItem('useStreamingOutput',String(this.checked));});
-    }
-    const testRenderBtn = document.getElementById('test-render-btn');
-    if (testRenderBtn) {
-        testRenderBtn.addEventListener('click', () => {
-            const chatHistoryEl = document.getElementById('chat-chat-history'); if(!chatHistoryEl)return;
-            if(chatHistoryEl.querySelector(".system-message")) chatHistoryEl.innerHTML = '';
-            const testMsgDiv = document.createElement('div'); testMsgDiv.className = 'ai-message';
-            const testMD = "### Test MD\n\n- List\n- KaTeX: $E=mc^2$ and $$\\sum_{i=0}^n i^2 = \\frac{n(n+1)(2n+1)}{6}$$";
-            processAIMessage(testMsgDiv, testMD); // Use the main processing function
-            chatHistoryEl.appendChild(testMsgDiv); scrollToChatBottom(chatHistoryEl);
-        });
-    } else {
-        console.warn("Test render button #test-render-btn not found in HTML.");
-    }
-}
-
-function initVoiceFeature() {
-    const startRecordingBtn = document.getElementById('voice-start-recording');
-    const stopRecordingBtn = document.getElementById('voice-stop-recording');
-    const voiceResultEl = document.getElementById('voice-result');
-
-    // 检查浏览器是否支持录音功能
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-        if (startRecordingBtn) startRecordingBtn.disabled = true;
-        if (stopRecordingBtn) stopRecordingBtn.disabled = true;
-        if (voiceResultEl) voiceResultEl.textContent = '抱歉，您的浏览器不支持录音功能。';
-        console.warn("Browser does not support MediaRecorder or getUserMedia.");
-        return;
-    }
-
-    // 确保所有必要的元素都存在
-    if (!startRecordingBtn || !stopRecordingBtn || !voiceResultEl) {
-        console.error("Voice feature UI elements not found (start/stop button or result area).");
-        return;
-    }
-
-    // “开始录音”按钮的事件监听器
-    startRecordingBtn.addEventListener('click', async () => {
-        audioChunks = []; // 清空之前的音频片段
-
-        // 禁用开始按钮，启用停止按钮，更新UI为录音状态
-        startRecordingBtn.disabled = true;
-        stopRecordingBtn.disabled = false;
-        if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中...</p>`;
-
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
-            // 尝试找到浏览器支持的音频格式
-            const mimeTypes = [
-                'audio/webm;codecs=opus',
-                'audio/ogg;codecs=opus',
-                'audio/mp4', // 有些浏览器可能支持mp4容器的AAC或Opus
-                'audio/webm', // 通用webm
-                'audio/ogg',  // 通用ogg
-                // 'audio/wav' // MediaRecorder对WAV的直接支持较少，通常需要后期转换
-            ];
-            const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
-
-            if (!supportedMimeType) {
-                alert("未找到浏览器支持的录音格式。");
-                console.error("No supported MIME type found for MediaRecorder.");
-                startRecordingBtn.disabled = false;
-                stopRecordingBtn.disabled = true;
-                if (voiceResultEl) voiceResultEl.textContent = '录音格式不受支持。';
-                stream.getTracks().forEach(track => track.stop()); // 关闭媒体流
-                return;
-            }
-            console.log("[VOICE] Using MIME type:", supportedMimeType);
-
-            mediaRecorder = new MediaRecorder(stream, { mimeType: supportedMimeType });
-
-            // *** 生成并设置当前语音请求的唯一ID ***
-            window.currentVoiceRequestId = generateUUID();
-            console.log('[VOICE] New currentVoiceRequestId set:', window.currentVoiceRequestId);
-            // 更新UI，可以包含部分ID用于调试
-            if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中... (ID: ${window.currentVoiceRequestId.substring(0,8)})</p>`;
-
-
-            mediaRecorder.ondataavailable = event => {
-                if (event.data.size > 0) {
-                    audioChunks.push(event.data);
-                }
-            };
-
-            mediaRecorder.onstop = () => {
-                console.log("[VOICE] Recording stopped. Audio chunks count:", audioChunks.length);
-                // 确保媒体流被关闭，释放麦克风
-                stream.getTracks().forEach(track => track.stop());
-
-                if (audioChunks.length === 0) {
-                    if (voiceResultEl) voiceResultEl.textContent = "未录到有效音频。";
-                    console.warn("[VOICE] No audio chunks recorded.");
-                    startRecordingBtn.disabled = false;
-                    stopRecordingBtn.disabled = true;
-                    return;
-                }
-
-                const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
-                sendVoiceToServer(audioBlob); // sendVoiceToServer 内部会设置 "处理中..."
-                audioChunks = []; // 清空，为下次录音准备
-
-                // 按钮状态的最终控制权在 sendVoiceToServer 成功或失败，以及Socket.IO事件回调中
-                // 这里可以暂时保持“停止录音”为禁用，因为处理已经开始
-                // startRecordingBtn.disabled = true; // 保持禁用，直到处理完成或失败
-                // stopRecordingBtn.disabled = true;  // 已经停止，禁用它
-            };
-
-            mediaRecorder.onerror = event => {
-                console.error("[VOICE] MediaRecorder error:", event.error);
-                alert(`录音出错: ${event.error.name || '未知错误'}`);
-                stream.getTracks().forEach(track => track.stop()); // 关闭媒体流
-                if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">录音错误: ${escapeHtml(event.error.name || '未知错误')}</p>`;
-                startRecordingBtn.disabled = false;
-                stopRecordingBtn.disabled = true;
-                window.currentVoiceRequestId = null; // 出错时清空ID
-            };
-            
-            mediaRecorder.start(); // 开始录音
-
-        } catch (error) {
-            console.error("[VOICE] Error starting recording or getting media:", error);
-            alert(`无法访问麦克风或启动录音: ${error.message}`);
-            if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">麦克风访问失败: ${escapeHtml(error.message)}</p>`;
-            startRecordingBtn.disabled = false;
-            stopRecordingBtn.disabled = true;
-            window.currentVoiceRequestId = null; // 出错时清空ID
-        }
-    });
-
-    // “停止录音”按钮的事件监听器
-    stopRecordingBtn.addEventListener('click', () => {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-            console.log("[VOICE] Stop recording button clicked.");
-            mediaRecorder.stop(); // 这会触发 mediaRecorder.onstop
-        }
-        // 按钮状态的更新主要由 onstop 和 onerror 控制，以及后续的Socket.IO事件
-        // stopRecordingBtn.disabled = true; // 立即禁用，防止重复点击
-        // startRecordingBtn.disabled = false; // 暂时不启用，等待处理结果
-    });
-
-    // 语音模块历史记录清除按钮 (如果这个逻辑不在这里，确保它在别处正确初始化)
-    document.getElementById('voice-clear-history')?.addEventListener('click', clearVoiceHistory);
-}
-
-function initVoiceAnswerHandlers(){ initVoiceFeature(); document.getElementById('voice-clear-history')?.addEventListener('click',clearVoiceHistory); }
-
-// --- Storage Functions ---
-function saveChatSessionsToStorage() { try {localStorage.setItem('chatSessions',JSON.stringify(chatSessions));}catch(e){console.error("Failed to save chat sessions:",e);} }
-function loadChatSessionsFromStorage() {
-    try {
-        const saved = localStorage.getItem('chatSessions');
-        if (saved) {
-            chatSessions = JSON.parse(saved);
-            const listEl = document.getElementById('chat-session-list');
-            if (listEl) { listEl.innerHTML = ''; chatSessions.sort((a,b)=>(b.id||0)-(a.id||0)).forEach(addChatHistoryItem); }
-            const lastSessionId = localStorage.getItem('currentChatSessionId');
-            if (lastSessionId && chatSessions.find(s => s.id === Number(lastSessionId))) {
-                currentChatSessionId = Number(lastSessionId);
-                const activeSessionItem = listEl?.querySelector(`[data-session-id="${currentChatSessionId}"]`);
-                if (activeSessionItem) activeSessionItem.click();
-                else clearCurrentChatDisplay();
-            } else { clearCurrentChatDisplay(); }
-        } else { clearCurrentChatDisplay(); }
-    } catch (e) { console.error("Failed to load chat sessions:", e); chatSessions=[]; clearCurrentChatDisplay(); }
-}
-function saveCurrentChatSessionId() {
-    if (currentChatSessionId) { localStorage.setItem('currentChatSessionId', currentChatSessionId); }
-    else { localStorage.removeItem('currentChatSessionId'); }
-}
-
-// --- Main Initialization ---
-
-
-// server/static/main.js
-
-// ... (确保文件顶部有这些全局变量的定义)
-// let TOKEN = ''; // Your existing TOKEN variable
-// let availableModels = {};
-// let selectedModel = { provider: null, model_id: null };
-// const MODEL_SELECTOR_STORAGE_KEY_PROVIDER = 'selectedProvider';
-// const MODEL_SELECTOR_STORAGE_KEY_MODEL_ID = 'selectedModelId';
-
-// ... (确保 fetchAndPopulateModels 和 handleModelSelectionChange 函数已按上一步骤添加) ...
-
-function initAllFeatures() {
-    console.log("--- Initializing All Features ---");
-    const tokenMeta = document.querySelector('meta[name="token"]');
-    if (tokenMeta?.content) {
-        TOKEN = tokenMeta.content;
-        console.log("Token loaded from meta tag:", TOKEN ? "Present" : "Empty/Not Present");
-    } else {
-        console.warn('Token meta tag missing or empty. Some features might not work.');
-    }
-
-    // 初始化核心渲染和UI组件
-    if (typeof initMarkdownRenderer === 'function') initMarkdownRenderer(); else console.warn("initMarkdownRenderer is not defined");
-    if (typeof initSidebarToggle === 'function') initSidebarToggle(); else console.warn("initSidebarToggle is not defined");
-    if (typeof initThemeSelector === 'function') initThemeSelector(); else console.warn("initThemeSelector is not defined");
-
-    // *** 新增：获取并填充模型选择器 ***
-    // 这个调用会异步获取模型列表并更新UI
-    if (typeof fetchAndPopulateModels === 'function') {
-        fetchAndPopulateModels(); 
-    } else {
-        console.error("CRITICAL: fetchAndPopulateModels function is not defined! Model selector will not work.");
-        // 可以在UI上显示更明显的错误，例如在 #model-selector 处
-        const modelSelectorEl = document.getElementById('model-selector');
-        if (modelSelectorEl) modelSelectorEl.innerHTML = '<option value="">错误: 模型加载功能缺失</option>';
-        const apiProviderDisplayEl = document.getElementById('api-provider-display');
-        if (apiProviderDisplayEl) apiProviderDisplayEl.textContent = 'AI模型: 功能错误';
-
-    }
-    
-    // KaTeX 渲染 (如果页面初始加载时就有需要渲染的内容)
-    if (typeof renderLatexInElement === 'function') {
-        // 延迟一点执行，确保DOM结构稳定，特别是如果其他初始化函数会修改DOM
-        setTimeout(() => {
-            document.querySelectorAll('.message-content').forEach(element => {
-                try {
-                    renderLatexInElement(element);
-                } catch (e) {
-                    console.error("Error rendering KaTeX for existing element:", e, element);
-                }
-            });
-        }, 100); // 短暂延迟
-    } else {
-        console.warn("renderLatexInElement function is not available. KaTeX rendering for existing content skipped.");
-    }
-
-    // 初始化其他UI处理器和功能模块
-    if (typeof initBaseButtonHandlers === 'function') initBaseButtonHandlers(); else console.warn("initBaseButtonHandlers is not defined");
-    if (typeof initTabs === 'function') initTabs(); else console.warn("initTabs is not defined");
-    if (typeof initScreenshotAnalysisHandlers === 'function') initScreenshotAnalysisHandlers(); else console.warn("initScreenshotAnalysisHandlers is not defined");
-    if (typeof initAiChatHandlers === 'function') initAiChatHandlers(); else console.warn("initAiChatHandlers is not defined");
-    if (typeof initVoiceAnswerHandlers === 'function') initVoiceAnswerHandlers(); else console.warn("initVoiceAnswerHandlers is not defined");
-    
-    // Socket.IO 初始化通常放在最后，因为它可能依赖于其他UI元素或状态的设置
-    if (typeof initSocketIO === 'function') initSocketIO(); else console.error("CRITICAL: initSocketIO is not defined! Real-time communication will not work.");
-
-    console.log("--- Application initialization complete ---");
-}
-
-// 保持您现有的两个 DOMContentLoaded 监听器
-// 第一个用于调用 initAllFeatures
-document.addEventListener('DOMContentLoaded', initAllFeatures);
-
-// 第二个用于按钮触摸效果 (保持不变)
-document.addEventListener('DOMContentLoaded', ()=>{
-    const btns=document.querySelectorAll('button,.btn,.tab-item');
-    btns.forEach(b=>{
-        let touchTimer;
-        const clearTimer=()=>{
-            if(touchTimer){
-                clearTimeout(touchTimer);
-                touchTimer=null;
-                b.classList.remove('touch-active');
-            }
-        };
-        b.addEventListener('touchstart',function(){
-            this.classList.add('touch-active');
-            touchTimer=setTimeout(clearTimer, 300); // 箭头函数会绑定外部的 clearTimer
-        },{passive:true});
-        // 对于 touchend 和 touchcancel，使用箭头函数以确保 clearTimer 的上下文正确
-        b.addEventListener('touchend', () => clearTimer()); 
-        b.addEventListener('touchcancel', () => clearTimer());
-    });
-    if(!document.querySelector('style#touch-active-style')){
-        const s=document.createElement('style');
-        s.id='touch-active-style';
-        s.textContent='.touch-active{opacity:0.7 !important; transform:scale(0.98) !important;}';
-        document.head.appendChild(s);
-    }
-});

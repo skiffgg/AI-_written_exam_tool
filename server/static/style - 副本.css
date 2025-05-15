@@ -415,21 +415,6 @@ body{
     box-shadow:inset 0 -2px 4px rgba(0,0,0,.04);
     -webkit-overflow-scrolling:touch
 }
-
-/* 去除按钮边框样式 */
-.btn-no-border {
-    border: none;
-    background: none;
-    padding: 0;
-    font-size: 1rem;
-    color: inherit;
-}
-
-.btn-no-border:hover {
-    background-color: #f0f0f0; /* 鼠标悬停背景色 */
-    cursor: pointer;
-}
-
 .tab-item{
     display:inline-flex;
     align-items:center;
@@ -455,120 +440,23 @@ body{
 /* =====================================================================
    Content Wrappers
    ===================================================================== */
-.tab-content-wrapper{flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;padding:1.5rem 0 1.5rem 0;min-height:0}
+.tab-content-wrapper{flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;padding:1.5rem;min-height:0}
 .tab-content{display:none;flex:1 1 auto;overflow:hidden}
 .tab-content.active{display:flex}
-
-/* 彻底消除所有缝隙 - 使用更强的选择器和!important */
-.main-content {
-    display: flex !important;
-    flex-grow: 1 !important;
-    gap: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    border-spacing: 0 !important;
-    border-collapse: collapse !important;
-    font-size: 0 !important; /* 消除内联元素间的空白 */
-}
-
-/* 修复左侧面板 - 增加宽度并使用Bootstrap类 */
-.left-panel, 
-aside.left-panel,
-.main-content > aside.left-panel {
-    width: 280px !important; /* 增加宽度 */
-    overflow-y: auto !important; /* 添加滚动条 */
-    background-color: #f0f4f8 !important; /* 使用更明显的背景色 */
-    border-right: 1px solid #ddd !important; /* 为分隔效果加边框 */
-    margin: 0 !important; /* 确保左侧栏没有间隙 */
-    padding: 10px 0 10px 10px !important;
-    box-sizing: border-box !important;
-}
-
-/* 修复右侧面板 - 适配Bootstrap类 */
-.right-panel,
-main.right-panel,
-.main-content > main.right-panel {
-    flex: 1 !important;
-    margin-left: 0 !important; /* 确保与左侧紧密对接 */
-    padding: 10px 10px 10px 0 !important;
-    background-color: #ffffff !important; /* 使用白色背景 */
-    border: none !important;
-    border-radius: 0 !important;
-    box-shadow: none !important;
-    box-sizing: border-box !important;
-}
-
-/* 为左右内容区增加不同背景形成分隔 */
-.main-content > aside {
-    background-color: #f0f4f8 !important;
-}
-
-.main-content > main {
-    background-color: #ffffff !important;
-}
-
-/* 确保AI分析结果框填满右侧区域 */
-.ai-analysis, 
-#ss-ai-analysis {
-    flex: 1 1 auto !important;
-    width: 100% !important;
-    height: 100% !important;
-    min-height: 200px !important;
-    margin: 0 !important;
-    box-sizing: border-box !important;
-    overflow-y: auto !important;
-}
-
-/* 确保分析卡片填满右侧面板 */
-.analysis-card {
-    display: flex !important;
-    flex-direction: column !important;
-    height: 100% !important;
-    width: 100% !important;
-}
-
-/* 添加调试边框以便查看元素边界 */
-.main-content {
-    outline: 1px solid blue;
-}
-.main-content > .left-panel {
-    outline: 1px solid red;
-}
-.main-content > .right-panel {
-    outline: 1px solid green;
-}
-
-/* 移除tab-content-wrapper的内边距 */
-.tab-content-wrapper {
-    padding: 0 !important;
-}
-
-/* 确保tab-content没有内边距 */
-.tab-content {
-    padding: 0 !important;
-    margin: 0 !important;
-}
-
-/* 移除所有可能的空白 */
-.tab-content > *, .tab-content-wrapper > * {
-    font-size: 0;
-}
-.tab-content > * > *, .tab-content-wrapper > * > * {
-    font-size: 0.95rem;
-}
+.main-content{width:100%;flex:1 1 auto;display:flex;gap:1.5rem;min-height:0}
 
 /* =====================================================================
    Sidebar (Left Panel)
    ===================================================================== */
-/* 改进侧边栏样式 */
-.left-panel {
-    width: 230px; /* 减小宽度 */
-    overflow-y: auto; /* 添加滚动条 */
-    background-color: #f7f7f7;
-    border-right: 1px solid #ddd; /* 添加右边框 */
-    margin: 0; /* 移除边距 */
-    padding: 10px 0 10px 10px; /* 只保留左侧和上下内边距 */
-    box-sizing: border-box; /* 确保边框计入宽度 */
+.left-panel{
+    width:30%;max-width:300px;min-width:200px;
+    display:flex;flex-direction:column;
+    overflow:hidden;padding:1rem;
+    background:var(--card-bg); /* USE VAR */
+    border:1px solid var(--panel-border-color); /* USE VAR */
+    border-radius:var(--border-radius);
+    box-shadow:var(--shadow);
+    transition:width .3s,min-width .3s,padding .3s,opacity .3s,visibility .3s,margin-right .3s
 }
 .main-content.sidebar-collapsed .left-panel{width:0;min-width:0;padding:0;margin-right:0;border:none;opacity:0;visibility:hidden}
 .main-content.sidebar-collapsed{gap:0}
@@ -582,22 +470,15 @@ main.right-panel,
 }
 .panel-title i{margin-right:.5rem;font-size:.9em}
 
-/* 调整滚动条样式 */
-.history-list {
-    max-height: 300px; /* 设置最大高度 */
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: #888 #e9ecef; /* 滚动条样式 */
+.history-list{
+    flex:1 1 auto;list-style:none;overflow-y:auto;
+    scrollbar-width:thin;
+    scrollbar-color:var(--scrollbar-thumb-color) var(--scrollbar-track-color); /* USE VAR */
 }
-.history-list::-webkit-scrollbar {
-    width: 8px;
-}
-.history-list::-webkit-scrollbar-thumb {
-    background-color: #888;
-    border-radius: 4px;
-}
-.history-list::-webkit-scrollbar-thumb:hover {
-    background-color: #555;
+.history-list::-webkit-scrollbar{width:5px}
+.history-list::-webkit-scrollbar-thumb{
+    background:var(--scrollbar-thumb-color); /* USE VAR */
+    border-radius:5px
 }
 .left-panel>.btn{margin-top:1rem}
 
@@ -663,25 +544,14 @@ main.right-panel,
 /* =====================================================================
    Right Panel Containers
    ===================================================================== */
-/* 改进右侧内容区域 */
-.right-panel {
-    flex-grow: 1;
-    display: flex;
-    flex-direction: column;
-    background-color: #fff;
-    padding: 10px 10px 10px 0; /* 只保留右侧和上下内边距 */
-    border-radius: 0; /* 移除圆角 */
-    border: none; /* 移除边框 */
-    border-left: none; /* 确保没有左边框 */
-    margin: 0; /* 移除所有外边距 */
-    box-shadow: none; /* 移除阴影 */
-    box-sizing: border-box; /* 确保边框计入宽度 */
-}
-
-/* 设计更紧密对接的右侧内容 */
-.right-panel > .analysis-card {
-    border-top: 1px solid #ddd;
-    padding-top: 1rem;
+.right-panel{flex:1 1 auto;display:flex;flex-direction:column;min-width:0}
+.analysis-card,.chat-card,.voice-card{
+    flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;
+    padding:1rem;
+    background:var(--card-bg); /* USE VAR */
+    border:1px solid var(--panel-border-color); /* USE VAR */
+    border-radius:var(--border-radius);
+    box-shadow:var(--shadow)
 }
 
 /* =====================================================================
