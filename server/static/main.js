@@ -465,6 +465,138 @@ function processAIMessage(messageElement, messageText, sourceEvent = "unknown") 
 //         }
 //     }
 // }
+
+function initVoiceFeature() {
+    const startRecordingBtn = document.getElementById('voice-start-recording');
+    const stopRecordingBtn = document.getElementById('voice-stop-recording');
+    const voiceResultEl = document.getElementById('voice-result');
+
+    // 检查浏览器是否支持录音功能
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+        if (startRecordingBtn) startRecordingBtn.disabled = true;
+        if (stopRecordingBtn) stopRecordingBtn.disabled = true;
+        if (voiceResultEl) voiceResultEl.textContent = '抱歉，您的浏览器不支持录音功能。';
+        console.warn("Browser does not support MediaRecorder or getUserMedia.");
+        return;
+    }
+
+    // 确保所有必要的元素都存在
+    if (!startRecordingBtn || !stopRecordingBtn || !voiceResultEl) {
+        console.error("Voice feature UI elements not found (start/stop button or result area).");
+        return;
+    }
+
+    // “开始录音”按钮的事件监听器
+    startRecordingBtn.addEventListener('click', async () => {
+        audioChunks = []; // 清空之前的音频片段
+
+        // 禁用开始按钮，启用停止按钮，更新UI为录音状态
+        startRecordingBtn.disabled = true;
+        stopRecordingBtn.disabled = false;
+        if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中...</p>`;
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            // 尝试找到浏览器支持的音频格式
+            const mimeTypes = [
+                'audio/webm;codecs=opus',
+                'audio/ogg;codecs=opus',
+                'audio/mp4', // 有些浏览器可能支持mp4容器的AAC或Opus
+                'audio/webm', // 通用webm
+                'audio/ogg',  // 通用ogg
+                // 'audio/wav' // MediaRecorder对WAV的直接支持较少，通常需要后期转换
+            ];
+            const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
+
+            if (!supportedMimeType) {
+                alert("未找到浏览器支持的录音格式。");
+                console.error("No supported MIME type found for MediaRecorder.");
+                startRecordingBtn.disabled = false;
+                stopRecordingBtn.disabled = true;
+                if (voiceResultEl) voiceResultEl.textContent = '录音格式不受支持。';
+                stream.getTracks().forEach(track => track.stop()); // 关闭媒体流
+                return;
+            }
+            console.log("[VOICE] Using MIME type:", supportedMimeType);
+
+            mediaRecorder = new MediaRecorder(stream, { mimeType: supportedMimeType });
+
+            // *** 生成并设置当前语音请求的唯一ID ***
+            window.currentVoiceRequestId = generateUUID();
+            console.log('[VOICE] New currentVoiceRequestId set:', window.currentVoiceRequestId);
+            // 更新UI，可以包含部分ID用于调试
+            if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中... (ID: ${window.currentVoiceRequestId.substring(0,8)})</p>`;
+
+
+            mediaRecorder.ondataavailable = event => {
+                if (event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                console.log("[VOICE] Recording stopped. Audio chunks count:", audioChunks.length);
+                // 确保媒体流被关闭，释放麦克风
+                stream.getTracks().forEach(track => track.stop());
+
+                if (audioChunks.length === 0) {
+                    if (voiceResultEl) voiceResultEl.textContent = "未录到有效音频。";
+                    console.warn("[VOICE] No audio chunks recorded.");
+                    startRecordingBtn.disabled = false;
+                    stopRecordingBtn.disabled = true;
+                    return;
+                }
+
+                const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                sendVoiceToServer(audioBlob); // sendVoiceToServer 内部会设置 "处理中..."
+                audioChunks = []; // 清空，为下次录音准备
+
+                // 按钮状态的最终控制权在 sendVoiceToServer 成功或失败，以及Socket.IO事件回调中
+                // 这里可以暂时保持“停止录音”为禁用，因为处理已经开始
+                // startRecordingBtn.disabled = true; // 保持禁用，直到处理完成或失败
+                // stopRecordingBtn.disabled = true;  // 已经停止，禁用它
+            };
+
+            mediaRecorder.onerror = event => {
+                console.error("[VOICE] MediaRecorder error:", event.error);
+                alert(`录音出错: ${event.error.name || '未知错误'}`);
+                stream.getTracks().forEach(track => track.stop()); // 关闭媒体流
+                if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">录音错误: ${escapeHtml(event.error.name || '未知错误')}</p>`;
+                startRecordingBtn.disabled = false;
+                stopRecordingBtn.disabled = true;
+                window.currentVoiceRequestId = null; // 出错时清空ID
+            };
+            
+            mediaRecorder.start(); // 开始录音
+
+        } catch (error) {
+            console.error("[VOICE] Error starting recording or getting media:", error);
+            alert(`无法访问麦克风或启动录音: ${error.message}`);
+            if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">麦克风访问失败: ${escapeHtml(error.message)}</p>`;
+            startRecordingBtn.disabled = false;
+            stopRecordingBtn.disabled = true;
+            window.currentVoiceRequestId = null; // 出错时清空ID
+        }
+    });
+
+    // “停止录音”按钮的事件监听器
+    stopRecordingBtn.addEventListener('click', () => {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            console.log("[VOICE] Stop recording button clicked.");
+            mediaRecorder.stop(); // 这会触发 mediaRecorder.onstop
+        }
+        // 按钮状态的更新主要由 onstop 和 onerror 控制，以及后续的Socket.IO事件
+        // stopRecordingBtn.disabled = true; // 立即禁用，防止重复点击
+        // startRecordingBtn.disabled = false; // 暂时不启用，等待处理结果
+    });
+
+    // 语音模块历史记录清除按钮 (如果这个逻辑不在这里，确保它在别处正确初始化)
+    document.getElementById('voice-clear-history')?.addEventListener('click', clearVoiceHistory);
+}
+
+
+
 // --- Model Selector Functions (MODIFIED) ---
 async function fetchAndPopulateModels() {
   const modelSelectorEl = document.getElementById('model-selector');
@@ -936,60 +1068,82 @@ function initAiChatHandlers() {
 }
 
 // --- NEW: Left Panel Top Controls Initialization ---
+// --- NEW: Left Panel Top Controls Initialization ---
 function initLeftPanelTopControls() {
-  // Toggle sidebar collapse state
-  document.querySelectorAll('.panel-sidebar-toggle-btn').forEach(button => {
-    button.addEventListener('click', () => {
-      const mainContent = button.closest('.main-content'); // The direct parent of left and right panels
-      if (mainContent) {
-        mainContent.classList.toggle('sidebar-collapsed');
-        const isCollapsed = mainContent.classList.contains('sidebar-collapsed');
-        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, isCollapsed);
-        console.log(`Sidebar toggled. Collapsed: ${isCollapsed}`);
-      }
+    const globalToggleButton = document.getElementById('global-sidebar-toggle');
+    const mainContent = document.querySelector('.main-content'); // 页面上通常只有一个 .main-content
+
+    if (!globalToggleButton || !mainContent) {
+        console.warn('Global sidebar toggle button (#global-sidebar-toggle) or .main-content element not found. Sidebar toggle functionality will not work.');
+        // 即使按钮没找到，下面的搜索框和动作按钮初始化仍应尝试执行
+    } else {
+        // 辅助函数：更新全局切换按钮的图标
+        function updateGlobalButtonIcon(isCollapsed) {
+            const icon = globalToggleButton.querySelector('i');
+            if (icon) {
+                if (isCollapsed) {
+                    icon.classList.remove('fa-bars');
+                    icon.classList.add('fa-chevron-left'); // 侧边栏折叠时，图标变为向左箭头
+                } else {
+                    icon.classList.remove('fa-chevron-left');
+                    icon.classList.add('fa-bars'); // 侧边栏展开时，图标为菜单横杠
+                }
+            }
+        }
+
+        // 为全局切换按钮添加点击事件监听器
+        globalToggleButton.addEventListener('click', () => {
+            mainContent.classList.toggle('sidebar-collapsed');
+            const isCollapsed = mainContent.classList.contains('sidebar-collapsed');
+            localStorage.setItem(SIDEBAR_COLLAPSED_KEY, isCollapsed); // SIDEBAR_COLLAPSED_KEY 需已定义
+            console.log(`Global sidebar toggled via header button. Collapsed: ${isCollapsed}`);
+            updateGlobalButtonIcon(isCollapsed);
+        });
+
+        // 从 localStorage 恢复侧边栏折叠状态，并设置全局按钮的初始图标
+        const savedSidebarState = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+        if (savedSidebarState) {
+            mainContent.classList.add('sidebar-collapsed');
+        }
+        // 总是根据初始状态（来自存储或默认）更新全局按钮的图标
+        updateGlobalButtonIcon(mainContent.classList.contains('sidebar-collapsed'));
+    }
+
+    // --- 以下是原函数中关于搜索框和其他顶部动作按钮的初始化代码 ---
+    // --- 这些元素仍然在左侧面板的各功能区内，所以这部分逻辑保留 ---
+
+    // 搜索框事件监听器
+    document.getElementById('screenshot-history-search-input')?.addEventListener('input', (e) => {
+        console.log("Screenshot search:", e.target.value);
+        /* TODO: Filter #ss-history-list */
     });
-  });
 
-  // Restore sidebar collapsed state from localStorage
-  const mainContentDivs = document.querySelectorAll('.main-content');
-  const savedSidebarState = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
-  if (savedSidebarState) {
-    mainContentDivs.forEach(mc => mc.classList.add('sidebar-collapsed'));
-    document.querySelectorAll('.panel-sidebar-toggle-btn i').forEach(icon => icon.className = 'fas fa-chevron-right');
-  }
+    document.getElementById('chat-session-search-input')?.addEventListener('input', (e) => {
+        console.log("Chat search:", e.target.value);
+        /* TODO: Filter #chat-session-list */
+    });
 
-  // Search input event listeners (future implementation)
-  document.getElementById('screenshot-history-search-input')?.addEventListener('input', (e) => {
-    console.log("Screenshot search:", e.target.value);
-    /* TODO: Filter #ss-history-list */
-  });
+    document.getElementById('voice-history-search-input')?.addEventListener('input', (e) => {
+        console.log("Voice search:", e.target.value);
+        /* TODO: Filter #voice-history-list */
+    });
 
-  document.getElementById('chat-session-search-input')?.addEventListener('input', (e) => {
-    console.log("Chat search:", e.target.value);
-    /* TODO: Filter #chat-session-list */
-  });
+    // 左侧面板顶部的新建/操作按钮 (这些按钮在各自的 .left-panel-top-controls 内)
+    document.getElementById('ss-capture-btn-top')?.addEventListener('click', () => {
+        if (typeof requestScreenshot === 'function') requestScreenshot();
+        else console.warn("requestScreenshot function not defined for top button.");
+    });
 
-  document.getElementById('voice-history-search-input')?.addEventListener('input', (e) => {
-    console.log("Voice search:", e.target.value);
-    /* TODO: Filter #voice-history-list */
-  });
+    document.getElementById('chat-new-session-btn-top')?.addEventListener('click', () => {
+        if (typeof clearCurrentChatDisplay === 'function') clearCurrentChatDisplay(true); // true for new session
+        else console.warn("clearCurrentChatDisplay function not defined for top button.");
+    });
 
-  // New action buttons
-  document.getElementById('ss-capture-btn-top')?.addEventListener('click', () => {
-    if (typeof requestScreenshot === 'function') requestScreenshot();
-    else console.warn("requestScreenshot function not defined for top button.");
-  });
-
-  document.getElementById('chat-new-session-btn-top')?.addEventListener('click', () => {
-    if (typeof clearCurrentChatDisplay === 'function') clearCurrentChatDisplay(true); // true for new session
-    else console.warn("clearCurrentChatDisplay function not defined for top button.");
-  });
-
-  document.getElementById('voice-new-recording-btn-top')?.addEventListener('click', () => {
-    const startRecordingBtn = document.getElementById('voice-start-recording');
-    if (startRecordingBtn && !startRecordingBtn.disabled) startRecordingBtn.click();
-    else console.warn("Start recording button not available or not ready.");
-  });
+    document.getElementById('voice-new-recording-btn-top')?.addEventListener('click', () => {
+        const startRecordingBtn = document.getElementById('voice-start-recording');
+        if (startRecordingBtn && !startRecordingBtn.disabled) startRecordingBtn.click();
+        else console.warn("Start recording button not available or not ready.");
+    });
 }
 
 // --- File Upload Handling ---
@@ -1782,144 +1936,7 @@ function saveChatSessionsToStorage() { try {localStorage.setItem('chatSessions',
 //     } catch (e) { console.error("Failed to load chat sessions:", e); chatSessions=[]; clearCurrentChatDisplay(); }
 // }
 
-function initVoiceFeature() {
-    const startRecordingBtn = document.getElementById('voice-start-recording');
-    const stopRecordingBtn = document.getElementById('voice-stop-recording');
-    const voiceResultEl = document.getElementById('voice-result');
 
-    // 检查浏览器是否支持录音功能
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-        if (startRecordingBtn) startRecordingBtn.disabled = true;
-        if (stopRecordingBtn) stopRecordingBtn.disabled = true;
-        if (voiceResultEl) voiceResultEl.textContent = '抱歉，您的浏览器不支持录音功能。';
-        console.warn("Browser does not support MediaRecorder or getUserMedia.");
-        return;
-    }
-
-    // 确保所有必要的元素都存在
-    if (!startRecordingBtn || !stopRecordingBtn || !voiceResultEl) {
-        console.error("Voice feature UI elements not found (start/stop button or result area).");
-        return;
-    }
-
-    // "开始录音"按钮的事件监听器
-    startRecordingBtn.addEventListener('click', async () => {
-        audioChunks = []; // 清空之前的音频片段
-
-        // 禁用开始按钮，启用停止按钮，更新UI为录音状态
-        startRecordingBtn.disabled = true;
-        stopRecordingBtn.disabled = false;
-        if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中...</p>`;
-
-        try {
-            // 请求麦克风访问权限
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-            // 确定浏览器支持的MIME类型
-            const supportedMimeTypes = [
-                'audio/webm', 
-                'audio/webm;codecs=opus',
-                'audio/ogg;codecs=opus',
-                'audio/mp4',
-                'audio/mpeg',
-                'audio/wav'
-            ];
-            
-            let supportedMimeType = '';
-            for (const mimeType of supportedMimeTypes) {
-                if (MediaRecorder.isTypeSupported(mimeType)) {
-                    supportedMimeType = mimeType;
-                    break;
-                }
-            }
-            
-            if (!supportedMimeType) {
-                throw new Error("浏览器不支持任何可用的音频格式。");
-            }
-            
-            console.log("[VOICE] Using MIME type:", supportedMimeType);
-
-            mediaRecorder = new MediaRecorder(stream, { mimeType: supportedMimeType });
-
-            // *** 生成并设置当前语音请求的唯一ID ***
-            window.currentVoiceRequestId = generateUUID();
-            console.log('[VOICE] New currentVoiceRequestId set:', window.currentVoiceRequestId);
-            // 更新UI，可以包含部分ID用于调试
-            if (voiceResultEl) voiceResultEl.innerHTML = `<p><i class="fas fa-microphone-alt fa-beat" style="color:red;"></i> 录音中... (ID: ${window.currentVoiceRequestId.substring(0,8)})</p>`;
-
-
-            mediaRecorder.ondataavailable = event => {
-                if (event.data.size > 0) {
-                    audioChunks.push(event.data);
-                }
-            };
-
-            mediaRecorder.onstop = () => {
-                console.log("[VOICE] MediaRecorder stopped. Processing audio...");
-                
-                // 停止所有音轨
-                stream.getTracks().forEach(track => track.stop());
-                
-                // 检查是否有录制的音频数据
-                if (audioChunks.length === 0) {
-                    console.error("[VOICE] No audio data recorded.");
-                    if (voiceResultEl) voiceResultEl.innerHTML = '<p class="error-message">未录制到音频数据，请重试。</p>';
-                    startRecordingBtn.disabled = false;
-                    stopRecordingBtn.disabled = true;
-                    window.currentVoiceRequestId = null; // 清理ID
-                    return;
-                }
-                
-                // 合并音频块并发送到服务器
-                const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
-                console.log(`[VOICE] Audio recorded: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
-                
-                // 发送到服务器处理
-                sendVoiceToServer(audioBlob);
-                
-                // 注意：按钮状态和UI更新由 sendVoiceToServer 函数处理
-            };
-
-            mediaRecorder.onerror = (event) => {
-                console.error("[VOICE] MediaRecorder error:", event.error);
-                if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">录音错误: ${event.error.message || '未知错误'}</p>`;
-                startRecordingBtn.disabled = false;
-                stopRecordingBtn.disabled = true;
-                window.currentVoiceRequestId = null; // 清理ID
-                
-                // 确保所有音轨都被停止
-                if (stream) {
-                    stream.getTracks().forEach(track => track.stop());
-                }
-            };
-
-            // 开始录音
-            mediaRecorder.start();
-            console.log("[VOICE] Recording started.");
-
-        } catch (error) {
-            console.error("[VOICE] Error starting recording:", error);
-            if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">无法开始录音: ${error.message}</p>`;
-            startRecordingBtn.disabled = false;
-            stopRecordingBtn.disabled = true;
-            window.currentVoiceRequestId = null; // 清理ID
-        }
-    });
-
-    // "停止录音"按钮的事件监听器
-    stopRecordingBtn.addEventListener('click', () => {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-            console.log("[VOICE] Stop recording button clicked.");
-            mediaRecorder.stop(); // 这会触发 mediaRecorder.onstop
-        }
-        // 按钮状态的更新主要由 onstop 和 onerror 控制，以及后续的Socket.IO事件
-        // stopRecordingBtn.disabled = true; // 立即禁用，防止重复点击
-        // startRecordingBtn.disabled = false; // 暂时不启用，等待处理结果
-    });
-
-    // 语音模块历史记录清除按钮 (如果这个逻辑不在这里，确保它在别处正确初始化)
-    document.getElementById('voice-clear-history')?.addEventListener('click', clearVoiceHistory);
-}
 
 
 // 修改后的 addVoiceHistoryItem (语音历史记录)

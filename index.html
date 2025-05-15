@@ -16,6 +16,7 @@
         <link rel="stylesheet" href="/server/static/style.css" /> 
 
         <style>
+            /* Styles for header buttons and select elements to make them look like text buttons */
             .btn-no-border,
             .header-right .form-select.btn-no-border {
                 border: none !important; 
@@ -35,19 +36,22 @@
                 color: var(--bs-white) !important;
             }
             .header-right .form-select.btn-no-border {
-                background-image: none !important; 
-                padding-right: 0.5rem !important; 
+                background-image: none !important; /* Remove default select arrow for Bootstrap */
+                padding-right: 0.5rem !important; /* Adjust padding if arrow is removed */
             }
             #model-selector.btn-no-border { min-width: 100px; max-width: 180px; text-align: left;}
             #theme-selector.btn-no-border { min-width: 70px; max-width: 100px; text-align: left;}
 
+            /* Connection Status Indicator */
             .status-indicator { width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }
             .status-indicator.disconnected { background-color: #ff6b6b; }
             .status-indicator.connected { background-color: #4caf50; }
 
+            /* Feature Content Blocks (for tab-like switching) */
             .feature-content-block { display: none; flex-direction: column; flex-grow: 1; height: 100%; overflow: hidden;}
             .feature-content-block.active { display: flex !important; } 
 
+            /* Left Panel Top Controls (search, new item buttons) */
             .left-panel-top-controls {
                 display: flex;
                 justify-content: space-between;
@@ -76,15 +80,17 @@
                 border: 1px solid var(--bs-border-color);
             }
             body.theme-dark .left-panel-top-controls .search-history-input {
-                background-color: var(--bs-gray-700);
-                border-color: var(--bs-gray-600);
-                color: var(--bs-light);
+                background-color: var(--bs-gray-700); /* Bootstrap dark variable */
+                border-color: var(--bs-gray-600);   /* Bootstrap dark variable */
+                color: var(--bs-light);             /* Bootstrap light text for dark inputs */
             }
+
+            /* Chat Input Area */
             .chat-input-bar { 
                 display: flex;
-                align-items: stretch; 
+                align-items: stretch; /* Make buttons same height as textarea */
                 background-color: var(--bs-tertiary-bg); 
-                border-radius: 22px; 
+                border-radius: 22px; /* Rounded bar */
                 padding: 0.3rem 0.5rem; 
                 border: 1px solid var(--bs-border-color);
             }
@@ -95,8 +101,9 @@
             #chat-attach-file-btn { 
                 flex-shrink: 0; 
                 color: var(--bs-secondary-color);
-                padding: 0.375rem 0.6rem !important;
+                padding: 0.375rem 0.6rem !important; /* Match Bootstrap's sm button padding */
                 margin-right: 0.25rem; 
+                /* Ensure icon is vertically centered if needed */
             }
             #chat-chat-input { 
                 flex-grow: 1; 
@@ -104,33 +111,43 @@
                 background-color: transparent;
                 box-shadow: none !important;
                 resize: none;
-                min-height: 38px; 
-                max-height: 120px; 
+                min-height: 38px; /* Approx 1 line with padding */
+                max-height: 120px; /* Limit expansion */
                 overflow-y: auto;
-                padding: 0.375rem 0.5rem; 
+                padding: 0.375rem 0.5rem; /* Bootstrap's sm form-control padding */
                 margin: 0; 
                 line-height: 1.5; 
-                padding-right: 35px; /* Space for send button */
+                /* Removed padding-right for send button, it's now a sibling */
             }
-             #chat-send-chat { /* Adjusted to be part of the flex flow initially */
+             #chat-send-chat { /* Send button */
                 flex-shrink: 0;
                 color: var(--bs-primary);
                 padding: 0.375rem 0.6rem !important;
-                font-size: 1rem;
+                font-size: 1rem; /* Adjust icon size if needed */
                 margin-left: 0.25rem;
             }
-            /* If you want send button absolutely positioned INSIDE textarea's visual space: */
-            /* .chat-input-bar { position: relative; } 
-               #chat-send-chat { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); z-index: 2;} */
-
-             .chat-input-area { 
+             .chat-input-area { /* Container for the input bar and options below it */
                 width: 100%; 
-                max-width: 800px; 
+                max-width: 800px; /* Optional: constrain width on larger screens */
                 margin-left: auto;
                 margin-right: auto;
-                margin-top: auto; 
+                margin-top: auto; /* Push to bottom of its flex container */
                 padding: 0.5rem; 
-                flex-shrink: 0;
+                flex-shrink: 0; /* Prevent shrinking when chat history grows */
+            }
+            /* Style for the new global sidebar toggle button in header */
+            .btn-icon-header {
+                background: transparent;
+                border: 1px solid rgba(255,255,255,.2); /* Example border */
+                color: rgba(255,255,255,.8);
+                padding: 0.3rem 0.6rem;
+                font-size: 0.9rem;
+                border-radius: var(--bs-border-radius-sm);
+                line-height: 1;
+            }
+            .btn-icon-header:hover {
+                background: rgba(255,255,255,.1);
+                color: #fff;
             }
         </style>
     </head>
@@ -138,7 +155,10 @@
     <body class="d-flex flex-column vh-100"> 
         <div class="container-fluid p-0 d-flex flex-column flex-grow-1">
             <header class="header d-flex justify-content-between align-items-center px-3 py-2 flex-shrink-0">
-                <div class="header-left d-flex align-items-center">   
+                <div class="header-left d-flex align-items-center">
+                    <button id="global-sidebar-toggle" class="btn btn-icon-header me-2" title="折叠/展开侧栏">
+                        <i class="fas fa-bars"></i>
+                    </button>
                     <div>
                         <h1 class="mb-0 h5 text-white">AI助手</h1>
                         <p class="mb-0 small text-white-50">截图分析 · AI对话 · 语音回答</p>
@@ -157,13 +177,13 @@
                     </div>
                     <div class="model-selection-container">
                         <select id="model-selector" class="form-select form-select-sm btn-no-border" title="选择AI模型" style="min-width: 100px; max-width: 180px;">
-                            <option value="" style="background-color: var(--bs-body-bg); color: var(--bs-body-color);">模型...</option>
+                            <option value="">模型...</option>
                         </select>
                     </div>
                     <div class="theme-selection-container">
                         <select id="theme-selector" class="form-select form-select-sm btn-no-border" title="选择主题" style="min-width: 70px;">
-                            <option value="light" style="background-color: var(--bs-body-bg); color: var(--bs-body-color);">浅色</option>
-                            <option value="dark" style="background-color: var(--bs-body-bg); color: var(--bs-body-color);">深色</option>
+                            <option value="light">浅色</option>
+                            <option value="dark">深色</option>
                         </select>
                     </div>
                     <div class="status-item d-flex align-items-center gap-1" title="与服务器的实时连接状态">
@@ -173,12 +193,11 @@
                 </div>
             </header>
 
-            <div class="main-content d-flex flex-grow-1 gap-0 overflow-hidden p-2">
+            <div class="main-content d-flex flex-grow-1 overflow-hidden p-2">
                 <aside class="left-panel d-flex flex-column border rounded p-2 bg-body-tertiary flex-shrink-0" style="width: 280px;">
                     
                     <div id="left-panel-screenshot-analysis" class="feature-content-block">
                         <div class="left-panel-top-controls">
-                            <button class="btn-icon panel-sidebar-toggle-btn" title="折叠/展开侧栏"><i class="fas fa-bars"></i></button>
                             <input type="search" id="screenshot-history-search-input" class="form-control form-control-sm search-history-input" placeholder="搜索截图...">
                             <button id="ss-capture-btn-top" class="btn-icon" title="发起截屏"><i class="fas fa-camera"></i></button>
                         </div>
@@ -193,7 +212,6 @@
 
                     <div id="left-panel-ai-chat" class="feature-content-block active">
                         <div class="left-panel-top-controls">
-                            <button class="btn-icon panel-sidebar-toggle-btn" title="折叠/展开侧栏"><i class="fas fa-bars"></i></button>
                             <input type="search" id="chat-session-search-input" class="form-control form-control-sm search-history-input" placeholder="搜索对话...">
                             <button id="chat-new-session-btn-top" class="btn-icon" title="新对话"><i class="fas fa-edit"></i></button> 
                         </div>
@@ -208,7 +226,6 @@
 
                     <div id="left-panel-voice-answer" class="feature-content-block">
                         <div class="left-panel-top-controls">
-                            <button class="btn-icon panel-sidebar-toggle-btn" title="折叠/展开侧栏"><i class="fas fa-bars"></i></button>
                             <input type="search" id="voice-history-search-input" class="form-control form-control-sm search-history-input" placeholder="搜索语音历史...">
                             <button id="voice-new-recording-btn-top" class="btn-icon" title="开始新录音"><i class="fas fa-microphone-plus"></i></button>
                         </div>
@@ -222,7 +239,7 @@
                     </div>
                 </aside>
 
-                <main class="right-panel flex-grow-1 d-flex flex-column border rounded p-2 bg-body-tertiary overflow-hidden ms-2">
+                <main class="right-panel flex-grow-1 d-flex flex-column border rounded p-2 bg-body-tertiary overflow-hidden">
                     
                     <div id="right-panel-screenshot-analysis" class="feature-content-block">
                         <div class="analysis-card d-flex flex-column flex-grow-1 h-100">
@@ -235,7 +252,7 @@
                                     <i class="fas fa-crop-alt small"></i> 裁剪
                                 </button>
                             </h3>
-                            <div id="ss-ai-analysis" class="ai-analysis flex-grow-1 overflow-auto p-2 border rounded bg-light-subtle">
+                            <div id="ss-ai-analysis" class="ai-analysis flex-grow-1 overflow-auto p-2 border rounded">
                                 请在左侧点击历史记录查看分析结果，或点击“发起截屏”进行分析。
                             </div>
                         </div>
@@ -244,7 +261,7 @@
                     <div id="right-panel-ai-chat" class="feature-content-block active">
                         <div class="chat-card d-flex flex-column flex-grow-1 h-100">
                             <h3 class="panel-title h6 mb-2 flex-shrink-0"><i class="fas fa-comments me-2"></i>AI对话</h3>
-                            <div id="chat-chat-history" class="ai-analysis chat-messages flex-grow-1 overflow-auto p-2 border rounded bg-light-subtle">
+                            <div id="chat-chat-history" class="ai-analysis chat-messages flex-grow-1 overflow-auto p-2 border rounded">
                                 <div class="system-message">选择左侧记录或开始新对话...</div>
                             </div>
                             <div class="chat-input-area">
@@ -277,7 +294,7 @@
                     <div id="right-panel-voice-answer" class="feature-content-block">
                         <div class="voice-card d-flex flex-column flex-grow-1 h-100">
                             <h3 class="panel-title h6 mb-2 flex-shrink-0"><i class="fas fa-microphone-alt me-2"></i>语音对话</h3>
-                            <div id="voice-result" class="ai-analysis flex-grow-1 overflow-auto p-2 border rounded bg-light-subtle">
+                            <div id="voice-result" class="ai-analysis flex-grow-1 overflow-auto p-2 border rounded">
                                 点击下方按钮开始录音，识别结果和 AI 回答将显示在此处。
                             </div>
                             <div class="voice-controls d-flex gap-2 mt-2 justify-content-center flex-shrink-0">
