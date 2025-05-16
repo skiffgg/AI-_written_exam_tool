@@ -156,6 +156,8 @@
     --selection-box-shadow-color: rgba(0,0,0,.6);
     --resize-handle-bg: rgba(var(--primary-color-rgb),.5);
     --crop-info-text-color: #555555;
+
+    --sidebar-width: 280px; /* 侧栏默认宽度 */
 }
 
 /* =====================================================================
@@ -207,6 +209,24 @@ body.theme-dark {
     --history-item-delete-btn-color: #ff8a80c2;
     --history-item-delete-btn-hover-bg: rgba(255,138,128,.1);
     --history-item-delete-btn-hover-color: #ff8a80;
+
+        /* Bootstrap 基础 */
+    --bs-body-bg:        #121212;
+    --bs-body-color:     #e0e0e0;
+    --bs-body-tertiary:  #1e1e1e;
+    --bs-tertiary-bg:    #272b30;
+    --bs-secondary-color:#b0b0b0;
+    --bs-border-color-translucent:#40454a;
+
+        /* 全局 Bootstrap 边框基准 */
+    --bs-border-color:            rgba(255,255,255,0.06);
+    --bs-border-color-translucent:rgba(255,255,255,0.06);   /* 关键：让所有用 translucent 的地方一起变暗 */
+
+    /* 任选：把你自己的统一变量也同步一下 */
+    --panel-border-color:         rgba(255,255,255,0.06);
+
+    /* 可选：主品牌色同步深色主色 */
+    --bs-primary: #5c85d6;
 
     /* --- AI Analysis / Chat Area --- */
     --ai-analysis-bg: #252525;
@@ -492,8 +512,8 @@ body{
 }
 
 .left-panel {
-    width: 280px; /* Default width */
-    min-width: 280px; /* Prevent shrinking too much */
+    width: var(--sidebar-width);
+    min-width: var(--sidebar-width);
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
@@ -503,6 +523,8 @@ body{
     border-radius: var(--bs-border-radius); /* Bootstrap variable */
     padding: 0.75rem;
     transition: width 0.3s ease, min-width 0.3s ease, padding 0.3s ease, opacity 0.3s ease;
+    background:var(--card-bg); 
+    border:1px solid var(--panel-border-color);
 }
 
 .right-panel {
@@ -515,13 +537,17 @@ body{
     border-radius: var(--bs-border-radius);
     padding: 0.75rem;
     min-width: 0; /* Allow shrinking */
+    background:var(--card-bg);
+    border:1px solid var(--panel-border-color);
+    padding-left: 0 !important;
+    padding-right: 0 !important;
 
 }
 
 /* Styles for when sidebar is collapsed */
 .main-content.sidebar-collapsed .left-panel {
-    width: 0;
-    min-width: 0;
+    width: 0 !important;
+    min-width: 0 !important;
     padding-left: 0;
     padding-right: 0;
     opacity: 0;
@@ -696,7 +722,15 @@ body{
     background:var(--scrollbar-thumb-color);
     border-radius:5px
 }
-.chat-messages{display:flex;flex-direction:column;gap:.5rem;padding-bottom:1rem}
+.chat-messages{
+    display:flex;
+    flex-direction:column;
+    gap:.5rem;
+    padding-bottom:1rem;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+
+}
 
 /* Message Styling (User, AI, System, Error) */
 .user-message,.ai-message,.error-message,.system-message,.ai-thinking{
@@ -711,13 +745,38 @@ body{
     color:var(--user-message-text-color);
     border-bottom-right-radius:3px
 }
-.ai-message{
-    margin-right:auto;
-    background:var(--ai-message-bg);
-    color:var(--ai-message-text-color);
-    border-bottom-left-radius:3px
+
+/* ① 彻底去掉聊天容器自己的左右 padding —— 盖掉 Bootstrap 的 p-2 */
+#chat-chat-history{
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    scrollbar-gutter: stable;
 }
-.ai-message strong{color:var(--ai-message-strong-color)}
+
+.ai-message{
+    /* —— 去气泡 —— */
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+
+    /* —— 布局 —— */
+    width: 100%;
+    max-width: none !important;   /* ★ 关键：撕掉 90% */
+    box-sizing: border-box;
+    text-align: left;
+
+    /* —— 留白 —— */
+    margin-block: .75rem;         /* 上下间距 */
+    padding-inline: clamp(1rem, 8vw, 8rem);  /* 左右随屏宽 1–4 rem */
+}
+
+
+
+.ai-message strong{
+    color:var(--ai-message-strong-color);
+    display: block;
+    margin-bottom: .25rem;
+}
 .error-message{
     background:var(--error-message-bg);
     color:var(--error-message-text-color);
@@ -933,6 +992,16 @@ body.theme-dark .streaming-toggle {
 }
 .buttons{display:flex;justify-content:flex-end;gap:.75rem}
 
+/* -- 查看原图浮层专用补丁 -- */
+#viewer-overlay .image-container img {
+  max-width: 95vw;
+  max-height: 95vh;
+  cursor: zoom-out;
+}
+#viewer-overlay .selection-box,
+#viewer-overlay .resize-handle { display:none !important; }
+
+
 /* =====================================================================
    Utility Buttons (General styling, specific Bootstrap classes used in HTML will take precedence)
    ===================================================================== */
@@ -1082,5 +1151,22 @@ button:disabled{opacity:.65;cursor:not-allowed;transform:none!important;box-shad
 /* Theme Selector Specific Styling (already covered by .header-right .form-select-sm generally) */
 /* #theme-selector might not need extra rules if general .form-select-sm in header is styled */
 
+.ai-message{
+    max-width: none !important;   /* 彻底取消 90% 限制 */
+}
 
+#viewer-close-btn{
+  position:fixed;            /* 相对窗口 */
+  top:16px;
+  right:24px;
+  width:36px;height:36px;
+  line-height:34px;
+  font-size:1.6rem;
+  background:#0008;
+  color:#fff;
+  border-radius:50%;
+  z-index:1100;
+  cursor:pointer;
+}
+#viewer-close-btn:hover{background:#000c}
 

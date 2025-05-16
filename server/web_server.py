@@ -22,9 +22,10 @@ import tempfile
 from typing import Any, Dict, List, Optional # noqa E402
 import uuid # noqa E402
 
-from flask import Flask, jsonify, request, send_from_directory, render_template, abort # noqa E402
+from flask import Flask, jsonify, request, send_from_directory, render_template, abort, url_for# noqa E402
 from flask_cors import CORS # noqa E402
 from flask_socketio import SocketIO, emit # noqa E402
+from gtts import gTTS
 
 from PIL import Image # noqa E402
 from werkzeug.utils import secure_filename # noqa E402
@@ -116,6 +117,45 @@ socketio = SocketIO(
     logger=settings.debug_mode, # Enable socketio logs if debug_mode is true
     engineio_logger=settings.debug_mode # Enable engineio logs if debug_mode is true
 )
+
+def generate_tts(text: str, request_id: str) -> str:
+    """
+    用 gTTS 生成 MP3，返回静态文件 URL
+    """
+    out_dir = os.path.join(app.static_folder, 'tts')
+    os.makedirs(out_dir, exist_ok=True)
+    filename = f"{request_id}.mp3"
+    path = os.path.join(out_dir, filename)
+    # 生成 MP3
+    tts = gTTS(text=text, lang='zh-cn')
+    tts.save(path)
+    # 直接用 settings.base_url 构造 URL，避免后台任务没有请求上下文
+    base = settings.base_url.rstrip('/')
+    return f"{base}/static/tts/{filename}"
+
+
+# @socketio.on('chat_message')
+# def handle_chat_message(payload):
+#     request_id = payload['request_id']
+#     # …调用你的 AI，得到完整回复 full_text …
+#     full_text = call_your_ai(payload)
+
+#     # 1) 发送文字回复（非流式）
+#     emit('chat_response', {
+#         'request_id': request_id,
+#         'message': full_text,
+#         'provider': payload.get('provider'),
+#         'model_id': payload.get('model_id'),
+#         'session_id': payload.get('session_id'),
+#         'full_message': full_text
+#     })
+
+#     # 2) 生成 TTS 音频，并推给前端
+#     audio_url = generate_tts(full_text, request_id)
+#     emit('voice_answer_audio', {
+#         'request_id': request_id,
+#         'audio_url': audio_url
+#     })
 
 def check_token():
     if settings.dashboard_token and request.headers.get('Authorization') != f'Bearer {settings.dashboard_token}':
@@ -251,74 +291,156 @@ def _task_chat_only(
         else: socketio.emit('task_error', emit_error_data)
 
 def _task_process_voice(
-    temp_audio_path: Path, request_id: str, sid: Optional[str],
-    model_id: Optional[str] = None, provider_name: Optional[str] = None):
-    final_chat_model_id, final_chat_provider = _determine_model_and_provider(model_id, provider_name, ModelProvider.OPENAI)
-    log.info(f"[Task {request_id}] Processing voice file {temp_audio_path.name}. Chat: {final_chat_provider}/{final_chat_model_id}")
-    transcript, final_result_sent, stt_provider = None, False, "google_cloud_stt" # You might want to make stt_provider dynamic
+    temp_audio_path: Path,
+    request_id: str,
+    sid: Optional[str],
+    model_id: Optional[str] = None,
+    provider_name: Optional[str] = None,
+    stt_provider: Optional[str] = None  # 新增 stt_provider 参数
+):
+    """
+    处理语音文件：STT -> Chat -> TTS（仅语音对话使用）
+    根据 settings.stt_provider（或前端传入的 stt_provider）选择 Google STT 或 Whisper。
+    """
+    # 如果前端指定了 stt_provider，就临时覆盖全局设置
+    if stt_provider:
+        settings.stt_provider = stt_provider
+
+    # 确定用于聊天的模型和提供商
+    final_chat_model_id, final_chat_provider = _determine_model_and_provider(
+        model_id, provider_name, ModelProvider.OPENAI
+    )
+
+    log.info(
+        f"[Task {request_id}] Processing voice file {temp_audio_path.name}. "
+        f"Chat: {final_chat_provider}/{final_chat_model_id}, "
+        f"STT Provider: {settings.stt_provider}"
+    )
+
+    transcript = None
+    final_result_sent = False
+    # stt_provider 只用于 emit 元数据，真正调用取决于 settings.stt_provider
+    emit_stt_provider = settings.stt_provider
+
     try:
+        # --- 1. STT 语音转文字 ---
         try:
             transcript = transcribe_audio(temp_audio_path)
-            if transcript is not None:
-                log.info(f"[Task {request_id}] STT ({stt_provider}) successful: '{transcript[:100]}...'")
-                stt_emit_data = {'request_id': request_id, 'transcript': transcript, 'provider': stt_provider}
-                if sid: socketio.emit('stt_result', stt_emit_data, to=sid)
-                else: socketio.emit('stt_result', stt_emit_data)
+            if transcript:
+                log.info(f"[Task {request_id}] STT ({emit_stt_provider}) successful: '{transcript[:100]}...'" )
+                stt_emit_data = {
+                    'request_id': request_id,
+                    'transcript': transcript,
+                    'provider': emit_stt_provider
+                }
+                socketio.emit('stt_result', stt_emit_data, to=sid) if sid else socketio.emit('stt_result', stt_emit_data)
             else:
-                log.warning(f"[Task {request_id}] STT ({stt_provider}) no transcript for {temp_audio_path.name}.")
-                err_emit_data = {'request_id': request_id, 'error': '语音识别未返回结果', 'provider': stt_provider}
-                if sid: socketio.emit('stt_error', err_emit_data, to=sid)
-                else: socketio.emit('stt_error', err_emit_data)
+                log.warning(f"[Task {request_id}] STT returned empty result.")
+                err_data = {
+                    'request_id': request_id,
+                    'error': '语音识别未返回结果',
+                    'provider': emit_stt_provider
+                }
+                socketio.emit('stt_error', err_data, to=sid) if sid else socketio.emit('stt_error', err_data)
                 return
         except Exception as stt_err:
-            log.exception(f"[Task {request_id}] Error during STT for {temp_audio_path.name}")
-            err_emit_data = {'request_id': request_id, 'error': f"语音识别出错: {str(stt_err)}", 'provider': stt_provider}
-            if sid: socketio.emit('stt_error', err_emit_data, to=sid)
-            else: socketio.emit('stt_error', err_emit_data)
+            log.exception(f"[Task {request_id}] Error during STT: {stt_err}")
+            err_data = {
+                'request_id': request_id,
+                'error': f"语音识别出错: {stt_err}",
+                'provider': emit_stt_provider
+            }
+            socketio.emit('stt_error', err_data, to=sid) if sid else socketio.emit('stt_error', err_data)
             return
-        if transcript:
-            if not final_chat_model_id or not final_chat_provider:
-                err_msg_chat_model = "无法为语音转文字后的聊天确定AI模型。"
-                log.error(f"[Task {request_id}] {err_msg_chat_model}")
-                chat_err_emit_data = {'request_id': request_id, 'transcript': transcript, 'stt_provider': stt_provider,
-                                      'error': err_msg_chat_model, 'chat_provider': 'error', 'chat_model_id': 'error'}
-                if sid: socketio.emit('chat_error', chat_err_emit_data, to=sid)
-                else: socketio.emit('chat_error', chat_err_emit_data)
-                final_result_sent = True
-                return
-            log.info(f"[Task {request_id}] Sending transcript to chat AI ({final_chat_provider}/{final_chat_model_id})...")
-            try:
-                chat_result = chat_only(transcript, history=[], model_id=final_chat_model_id, provider=final_chat_provider)
-                message_text = str(chat_result.get('message', 'AI 未返回有效回复。'))
-                provider_used_chat = chat_result.get('provider', final_chat_provider)
-                model_used_chat = chat_result.get('model_id', final_chat_model_id)
-                log.info(f"[Task {request_id}] Chat successful (Provider: {provider_used_chat}, Model: {model_used_chat}).")
-                response_emit_data = {'request_id': request_id, 'transcript': transcript, 'stt_provider': stt_provider,
-                                      'chat_provider': provider_used_chat, 'chat_model_id': model_used_chat, 'message': message_text}
-                if sid: socketio.emit('voice_chat_response', response_emit_data, to=sid)
-                else: socketio.emit('voice_chat_response', response_emit_data)
-                final_result_sent = True
-            except Exception as chat_err:
-                log.exception(f"[Task {request_id}] Chat AI call failed after STT using {final_chat_provider}/{final_chat_model_id}")
-                chat_err_emit_data = {'request_id': request_id, 'transcript': transcript, 'stt_provider': stt_provider,
-                                      'chat_provider': final_chat_provider, 'chat_model_id': final_chat_model_id,
-                                      'error': f"AI 聊天处理失败: {str(chat_err)}"}
-                if sid: socketio.emit('chat_error', chat_err_emit_data, to=sid)
-                else: socketio.emit('chat_error', chat_err_emit_data)
-                final_result_sent = True
+
+        # --- 2. AI 聊天响应 ---
+        if not final_chat_model_id or not final_chat_provider:
+            err_msg = "无法为语音转文字后的聊天确定AI模型。"
+            log.error(f"[Task {request_id}] {err_msg}")
+            err_data = {
+                'request_id': request_id,
+                'transcript': transcript,
+                'stt_provider': emit_stt_provider,
+                'error': err_msg,
+                'chat_provider': 'error',
+                'chat_model_id': 'error'
+            }
+            socketio.emit('chat_error', err_data, to=sid) if sid else socketio.emit('chat_error', err_data)
+            final_result_sent = True
+            return
+
+        log.info(
+            f"[Task {request_id}] Sending transcript to chat AI ({final_chat_provider}/{final_chat_model_id})..."
+        )
+        try:
+            chat_result = chat_only(
+                transcript,
+                history=[],
+                model_id=final_chat_model_id,
+                provider=final_chat_provider
+            )
+            message_text = str(chat_result.get('message', 'AI 未返回有效回复。'))
+            provider_used = chat_result.get('provider', final_chat_provider)
+            model_used = chat_result.get('model_id', final_chat_model_id)
+
+            log.info(f"[Task {request_id}] Chat successful ({provider_used}/{model_used}).")
+
+            # 发送语音聊天回复
+            response_data = {
+                'request_id': request_id,
+                'transcript': transcript,
+                'stt_provider': emit_stt_provider,
+                'chat_provider': provider_used,
+                'chat_model_id': model_used,
+                'message': message_text
+            }
+            socketio.emit('voice_chat_response', response_data, to=sid) if sid else socketio.emit('voice_chat_response', response_data)
+
+            # --- 3. 生成语音音频并发送 ---
+            with app.app_context():
+                audio_url = generate_tts(message_text, request_id)
+
+            tts_data = {
+                'request_id': request_id,
+                'audio_url': audio_url
+            }
+            socketio.emit('voice_answer_audio', tts_data, to=sid) if sid else socketio.emit('voice_answer_audio', tts_data)
+
+            final_result_sent = True
+
+        except Exception as chat_err:
+            log.exception(f"[Task {request_id}] Chat AI call failed: {chat_err}")
+            err_data = {
+                'request_id': request_id,
+                'transcript': transcript,
+                'stt_provider': emit_stt_provider,
+                'chat_provider': final_chat_provider,
+                'chat_model_id': final_chat_model_id,
+                'error': f"AI 聊天处理失败: {chat_err}"
+            }
+            socketio.emit('chat_error', err_data, to=sid) if sid else socketio.emit('chat_error', err_data)
+            final_result_sent = True
+
     except Exception as e:
-        log.exception(f"[Task {request_id}] Unhandled error in voice task")
-        if sid and not final_result_sent:
-            socketio.emit('task_error', {'request_id': request_id, 'error': '语音处理任务发生未知错误'}, to=sid)
-        elif not final_result_sent:
-            socketio.emit('task_error', {'request_id': request_id, 'error': '语音处理任务发生未知错误'})
+        log.exception(f"[Task {request_id}] Unhandled error in voice task: {e}")
+        if not final_result_sent:
+            socketio.emit('task_error', {
+                'request_id': request_id,
+                'error': '语音处理任务发生未知错误'
+            }, to=sid) if sid else socketio.emit('task_error', {
+                'request_id': request_id,
+                'error': '语音处理任务发生未知错误'
+            })
+
     finally:
-        if temp_audio_path and temp_audio_path.exists():
+        # 删除临时语音文件
+        if temp_audio_path.exists():
             try:
-                temp_audio_path.unlink(missing_ok=True) # missing_ok=True for Python 3.8+
+                temp_audio_path.unlink(missing_ok=True)
                 log.info(f"[Task {request_id}] Temp voice file deleted: {temp_audio_path}")
             except OSError as e_unlink:
-                log.error(f"[Task {request_id}] Error deleting temp voice file {temp_audio_path}: {e_unlink}")
+                log.error(f"[Task {request_id}] Error deleting temp voice file: {e_unlink}")
+
 
 @socketio.on_error()
 def error_handler_socketio(e):
@@ -524,26 +646,56 @@ def process_voice_route():
     check_token()
     client_req_id = request.form.get('request_id')
     request_id = client_req_id or str(uuid.uuid4())
-    log.info(f"[Req {request_id}] Request /process_voice received.")
+
+    # 读取前端可选的 STT 提供商参数
+    stt_provider = request.form.get('stt_provider', None)
+    log.info(f"[Req {request_id}] Request /process_voice received. stt_provider={stt_provider}")
+
     if 'audio' not in request.files:
         return jsonify({'error': 'Missing audio file', 'request_id': request_id}), 400
+
     audio_file = request.files['audio']
     selected_model_id = request.form.get('model_id')
     selected_provider = request.form.get('provider')
     client_socket_id = request.form.get('socket_id')
+
     original_fn_base = secure_filename(Path(audio_file.filename).stem if audio_file.filename else "audio")
     timestamp_ms_str = str(int(time.time() * 1000))
     temp_filename = f'voice_{timestamp_ms_str}_{request_id[:8]}_{original_fn_base[:30]}.wav'
     temp_save_path = SAVE_DIR / temp_filename
-    try: audio_file.save(str(temp_save_path))
+
+    try:
+        audio_file.save(str(temp_save_path))
     except Exception as e_save_audio:
         log.exception(f"Save error for /process_voice: {e_save_audio}")
-        return jsonify({'error': f'保存语音文件失败: {str(e_save_audio)}', 'request_id': request_id}), 500
-    log.info(f"[Req {request_id}] Voice processing for {temp_save_path.name}. Chat Model: {selected_provider}/{selected_model_id}, Target SID: {client_socket_id or 'None'}")
+        return jsonify({
+            'error': f'保存语音文件失败: {str(e_save_audio)}',
+            'request_id': request_id
+        }), 500
+
+    log.info(
+        f"[Req {request_id}] Voice processing for {temp_save_path.name}. "
+        f"Chat Model: {selected_provider}/{selected_model_id}, "
+        f"STT Provider: {stt_provider}, Target SID: {client_socket_id or 'None'}"
+    )
+
     socketio.start_background_task(
-        target=_task_process_voice, temp_audio_path=temp_save_path, request_id=request_id, sid=client_socket_id,
-        model_id=selected_model_id, provider_name=selected_provider)
-    return jsonify({'status': 'processing', 'message': '语音已接收，正在后台处理...', 'request_id': request_id, 'temp_filename': temp_save_path.name}), 202
+        target=_task_process_voice,
+        temp_audio_path=temp_save_path,
+        request_id=request_id,
+        sid=client_socket_id,
+        model_id=selected_model_id,
+        provider_name=selected_provider,
+        stt_provider=stt_provider    # 传递 STT 提供商
+    )
+
+    return jsonify({
+        'status': 'processing',
+        'message': '语音已接收，正在后台处理...',
+        'request_id': request_id,
+        'temp_filename': temp_save_path.name
+    }), 202
+
 
 @app.route('/chat', methods=['POST'])
 def http_chat_route():
