@@ -242,18 +242,39 @@ def _task_analyze_image(
         else: socketio.emit('analysis_error', error_data)
 
 def _task_chat_only(
-    prompt: str, history: Optional[List[Dict[str, Any]]], request_id: str, sid: Optional[str],
-    use_streaming: bool = True, model_id: Optional[str] = None,
-    provider_name: Optional[str] = None, image_base64: Optional[str] = None):
+    prompt: str,
+    history: Optional[List[Dict[str, Any]]],
+    request_id: str,
+    sid: Optional[str], # Socket ID, 仅当通过Socket调用时存在
+    use_streaming: bool = True,
+    model_id: Optional[str] = None,
+    provider_name: Optional[str] = None,
+    image_base64: Optional[str] = None, # 旧的单图参数 (可能来自旧的socket调用)
+    all_images_base64: Optional[List[str]] = None # 新的，来自 /chat_with_file 的图片列表
+                                                # 也可用于新的 socket 调用 (如果 socket 也发列表)
+):
     final_model_id, final_provider = _determine_model_and_provider(model_id, provider_name, ModelProvider.OPENAI)
     if not final_model_id or not final_provider:
         err_msg = f"无法为聊天确定有效的模型或提供商。请求的模型: {model_id}, 提供商: {provider_name}"
         log.error(f"[Task {request_id}] {err_msg}")
         emit_error_data = {'request_id': request_id, 'error': err_msg}
         if sid: socketio.emit('task_error', emit_error_data, to=sid)
-        else: socketio.emit('task_error', emit_error_data)
+        # else: # 对于HTTP请求，错误通常在HTTP响应中处理，但也可以考虑通过某个机制通知
+        # log.error(f"[Task {request_id}] Task error for HTTP request: {err_msg}")
         return
-    log.info(f"[Task {request_id}] Processing chat. Model: {final_provider}/{final_model_id}, Streaming: {use_streaming}, Image: {'Yes' if image_base64 else 'No'}, Prompt: '{prompt[:30]}...'")
+
+    # --- 关键改动：整合图片数据 ---
+    # 优先使用 all_images_base64 (来自 /chat_with_file 或新的socket image_data_array)
+    # 如果 all_images_base64 不存在，但旧的 image_base64 存在，则使用旧的 (保持向后兼容)
+    images_to_send_to_core: Optional[List[str]] = None
+    if all_images_base64:
+        images_to_send_to_core = all_images_base64
+    elif image_base64: # 如果 all_images_base64 为 None 或空列表，但 image_base64 有值
+        images_to_send_to_core = [image_base64] # 将单个图片包装成列表
+
+    num_images_being_sent = len(images_to_send_to_core) if images_to_send_to_core else 0
+    log.info(f"[Task {request_id}] Processing chat. Model: {final_provider}/{final_model_id}, Streaming: {use_streaming}, Images: {num_images_being_sent}, Prompt: '{prompt[:30]}...'")
+
     try:
         if use_streaming:
             full_response_text = ""
@@ -262,33 +283,53 @@ def _task_chat_only(
                 full_response_text += chunk
                 emit_data_chunk = {'request_id': request_id, 'chunk': chunk, 'provider': final_provider, 'model_id': final_model_id}
                 if sid: socketio.emit('chat_stream_chunk', emit_data_chunk, to=sid)
-                else: socketio.emit('chat_stream_chunk', emit_data_chunk)
-                socketio.sleep(0.01)
-            # result = chat_only_stream(...) # chat_only_stream returns the result which includes the full message.
-            # We need the full_message for the 'chat_stream_end' event if not accumulated by callback.
-            # My core.chat.py modification made chat_only_stream return the full message.
-            # If your stream_callback populates full_response_text, result.get('message') might be redundant.
-            chat_only_stream(prompt, history=history, stream_callback=stream_callback,
-                             model_id=final_model_id, provider=final_provider, image_base64=image_base64)
+                else:# HTTP 请求的流式响应需要在API层面设计，这里暂时不直接emit
+                    socketio.emit('chat_stream_chunk', emit_data_chunk)
+                    log.debug(f"[Task {request_id}] HTTP Stream chunk broadcasted for debugging: {chunk[:30]}...")
+                socketio.sleep(0.01) # 保持 gevent 的友好性
+
+            # **将整合后的图片列表传递给核心函数**
+            # 假设 chat_only_stream 接受一个名为 'images_base64' (复数) 的参数，期望是 List[str] 或 None
+            chat_only_stream(
+                prompt,
+                history=history,
+                stream_callback=stream_callback,
+                model_id=final_model_id,
+                provider=final_provider,
+                images_base64=images_to_send_to_core # 传递列表
+            )
             emit_data_end = {'request_id': request_id, 'provider': final_provider, 'model_id': final_model_id,
-                               'full_message': full_response_text} # Use accumulated text
+                               'full_message': full_response_text}
             if sid: socketio.emit('chat_stream_end', emit_data_end, to=sid)
-            else: socketio.emit('chat_stream_end', emit_data_end)
-            log.debug(f"[Task {request_id}] Emitted 'chat_stream_end'.")
-        else:
-            result = chat_only(prompt, history=history, model_id=final_model_id, provider=final_provider, image_base64=image_base64)
+            else: # HTTP 请求
+                socketio.emit('chat_stream_end', emit_data_end)
+            # else: # 对于HTTP请求的流式结束，通常不需要特定事件，客户端通过流结束自行判断
+            log.debug(f"[Task {request_id}] Stream ended. Emitted 'chat_stream_end' if SID present.")
+        else: # 非流式
+            # **将整合后的图片列表传递给核心函数**
+            # 假设 chat_only 接受一个名为 'images_base64' (复数) 的参数
+            result = chat_only(
+                prompt,
+                history=history,
+                model_id=final_model_id,
+                provider=final_provider,
+                images_base64=images_to_send_to_core # 传递列表
+            )
             message_text = str(result.get('message', '')) or 'AI未返回有效内容'
             emit_data_response = {'request_id': request_id, 'message': message_text,
                                     'provider': final_provider, 'model_id': final_model_id}
             if sid: socketio.emit('chat_response', emit_data_response, to=sid)
-            else: socketio.emit('chat_response', emit_data_response)
-            log.debug(f"[Task {request_id}] Emitted 'chat_response'.")
+            # else: # 对于HTTP请求的非流式响应，结果通常直接在HTTP响应中返回
+            # 我们当前的 /chat_with_file 接口是异步启动任务，不直接返回AI结果
+            log.debug(f"[Task {request_id}] Non-streaming response generated. Emitted 'chat_response' if SID present.")
+            
     except Exception as e:
-        log.exception(f"[Task {request_id}] Error in chat task with {final_provider}/{final_model_id}: {str(e)}")
-        error_message = f"处理聊天请求时出错 (模型: {final_provider}/{final_model_id}): {str(e)}"
+        log.exception(f"[Task {request_id}] Error in chat task with {final_provider}/{final_model_id} (Images: {num_images_being_sent}): {str(e)}")
+        error_message = f"处理聊天请求时出错 (模型: {final_provider}/{final_model_id}, 图片数: {num_images_being_sent}): {str(e)}"
         emit_error_data = {'request_id': request_id, 'error': error_message, 'provider': final_provider, 'model_id': final_model_id}
         if sid: socketio.emit('task_error', emit_error_data, to=sid)
-        else: socketio.emit('task_error', emit_error_data)
+        # else: log.error(f"Task error for HTTP request {request_id}: {error_message}")
+
 
 def _task_process_voice(
     temp_audio_path: Path,
@@ -476,32 +517,61 @@ def handle_frontend_screenshot_request_socket():
     socketio.emit('capture')
     log.info("Broadcasted 'capture' command (intended for GUI app).")
 
+# web_server.py
+
 @socketio.on('chat_message')
 def handle_chat_message_socket(data: Dict[str, Any]):
-    sid = request.sid # type: ignore
+    sid = request.sid
     log.info(f"Received 'chat_message' from SID: {sid}. Data Keys: {list(data.keys())}")
     if not isinstance(data, dict):
         log.warning(f"Invalid chat data format from SID {sid}")
-        socketio.emit('chat_error', {'message': 'Invalid request format.'}, to=sid); return
+        socketio.emit('task_error', {'message': 'Invalid request format.'}, to=sid); return # Changed from chat_error
+
     prompt = data.get('prompt', '').strip()
     history_data = data.get('history', [])
     client_request_id = data.get('request_id')
-    use_streaming = data.get('use_streaming', True)
+    use_streaming = data.get('use_streaming', True) # 假设前端会传这个
     selected_model_id = data.get('model_id')
     selected_provider = data.get('provider')
-    image_base64_data = data.get('image_data')
-    log.info(f"Chat details: SID={sid}, Prompt='{prompt[:30]}...', Streaming={use_streaming}, Model={selected_provider}/{selected_model_id}, Img: {'Yes' if image_base64_data else 'No'}")
-    if not prompt and not image_base64_data:
-        log.warning(f"Empty prompt and no image in chat_message from SID {sid}")
-        socketio.emit('chat_error', {'request_id': client_request_id, 'message': 'Prompt or image cannot be empty.'}, to=sid); return
-    request_id_to_use = client_request_id or str(uuid.uuid4())
-    log.info(f"[Req {request_id_to_use}] Starting background task for chat from SID {sid}")
-    socketio.start_background_task(
-        target=_task_chat_only, prompt=prompt, history=history_data, request_id=request_id_to_use,
-        sid=sid, use_streaming=use_streaming, model_id=selected_model_id,
-        provider_name=selected_provider, image_base64=image_base64_data)
-    socketio.emit('chat_processing', {'request_id': request_id_to_use, 'status': 'processing'}, to=sid)
 
+    # 旧的单图 image_data (保留，但优先用 image_data_array)
+    single_image_base64_data = data.get('image_data')
+    # 新的多图 image_data_array
+    image_array_from_socket = data.get('image_data_array') # 前端发送的是 image_data_array
+
+    # 整合图片数据
+    images_for_task: Optional[List[str]] = None
+    if image_array_from_socket and isinstance(image_array_from_socket, list):
+        images_for_task = image_array_from_socket
+        log.info(f"Chat (socket): Using image_data_array with {len(images_for_task)} images.")
+    elif single_image_base64_data and isinstance(single_image_base64_data, str):
+        images_for_task = [single_image_base64_data]
+        log.info(f"Chat (socket): Using single image_data, wrapped into a list.")
+
+    num_images = len(images_for_task) if images_for_task else 0
+    log.info(f"Chat details (socket): SID={sid}, Prompt='{prompt[:30]}...', Streaming={use_streaming}, Model={selected_provider}/{selected_model_id}, Images: {num_images}")
+
+    if not prompt and not images_for_task: # 如果没有文本也没有任何图片
+        log.warning(f"Empty prompt and no images in chat_message from SID {sid}")
+        socketio.emit('task_error', {'request_id': client_request_id, 'error': 'Prompt or images cannot be empty.'}, to=sid); return
+
+    request_id_to_use = client_request_id or str(uuid.uuid4())
+    log.info(f"[Req {request_id_to_use}] Starting background task for chat from SID {sid} (via socket)")
+
+    socketio.start_background_task(
+        target=_task_chat_only,
+        prompt=prompt,
+        history=history_data,
+        request_id=request_id_to_use,
+        sid=sid,
+        use_streaming=use_streaming,
+        model_id=selected_model_id,
+        provider_name=selected_provider,
+        # 传递整合后的图片列表给 _task_chat_only 的 all_images_base64 参数
+        all_images_base64=images_for_task,
+        image_base64=None # 因为已经包含在 all_images_base64 中（如果只有一个的话）
+    )
+    socketio.emit('chat_processing', {'request_id': request_id_to_use, 'status': 'processing'}, to=sid)
 @app.route('/')
 def index_route():
     return render_template('dashboard.html', token=settings.dashboard_token or "")
@@ -721,65 +791,125 @@ def http_chat_route():
 @app.route('/chat_with_file', methods=['POST'])
 def chat_with_file_route():
     check_token()
-    request_id = request.form.get('request_id')
-    if not request_id: return jsonify({'error': "Missing 'request_id' in form data"}), 400
-    log.info(f"[Req {request_id}] Request /chat_with_file received.")
-    prompt = request.form.get('prompt', '')
-    uploaded_file = request.files.get('file')
+    form_request_id = request.form.get('request_id')
+    if not form_request_id:
+        log.warning("/chat_with_file: Missing 'request_id' in form data.")
+        return jsonify({'error': "Missing 'request_id' in form data"}), 400
+    
+    log.info(f"[Req {form_request_id}] HTTP POST to /chat_with_file received (unified media).")
+
+    prompt_from_user = request.form.get('prompt', '').strip()
     history_json_str = request.form.get('history', '[]')
     selected_model_id = request.form.get('model_id')
     selected_provider = request.form.get('provider')
+    # session_id_from_form = request.form.get('session_id') # 可选
+
     history_data = []
     try:
         history_data = json.loads(history_json_str)
-        if not isinstance(history_data, list): history_data = []
-    except: history_data = [] # type: ignore
-    if not prompt.strip() and not uploaded_file:
-        return jsonify({'error': 'Request needs a prompt or a file.', 'request_id': request_id}), 400
-    temp_file_path: Optional[Path] = None
-    image_base64_for_chat: Optional[str] = None
-    final_prompt_for_chat = prompt
+        if not isinstance(history_data, list):
+            history_data = []
+    except json.JSONDecodeError:
+        history_data = []
+        log.warning(f"[Req {form_request_id}] Invalid history JSON: {history_json_str[:100]}")
+
+    # 1. 处理上传的文件 (来自 <input type="file" name="files" multiple>)
+    uploaded_file_objects = request.files.getlist("files")
+    
+    # 2. 处理粘贴的图片Base64数据 (来自 FormData 的 pasted_images_base64_json_array)
+    pasted_images_base64_json = request.form.get("pasted_images_base64_json_array", "[]")
+    direct_pasted_images_base64 = []
     try:
-        if uploaded_file:
-            if not uploaded_file.filename: return jsonify({'error': 'Uploaded file has no filename', 'request_id': request_id}), 400
-            original_filename = secure_filename(uploaded_file.filename)
-            file_ext = os.path.splitext(original_filename)[1].lower()
-            log.info(f"[Req {request_id}] /chat_with_file: Processing file '{original_filename}' (Ext: {file_ext})")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext, dir=str(SAVE_DIR.resolve())) as temp_f:
-                uploaded_file.save(temp_f.name)
-                temp_file_path = Path(temp_f.name)
-            log.debug(f"[Req {request_id}] Temp file for /chat_with_file: {temp_file_path}")
-            if file_ext in ALLOWED_IMAGE_EXT:
-                log.debug(f"[Req {request_id}] File is IMAGE. Passing as image_base64.")
-                img_bytes_content = temp_file_path.read_bytes()
-                image_base64_for_chat = base64.b64encode(img_bytes_content).decode('utf-8')
-            elif file_ext in ALLOWED_TEXT_EXT:
-                log.debug(f"[Req {request_id}] File is TEXT. Prepending content to prompt.")
-                file_content_str = temp_file_path.read_text(encoding='utf-8', errors='ignore')[:MAX_TEXT_FILE_CHARS]
-                if len(file_content_str) == MAX_TEXT_FILE_CHARS and temp_file_path.stat().st_size > MAX_TEXT_FILE_CHARS:
-                    file_content_str += "\n[...文件内容过长，已截断...]"
-                header = f"[上下文：用户上传了文本文件: {original_filename}]\n文件内容摘要:\n```\n"
-                footer = "\n```\n请基于以上文件内容和用户的问题进行回复。"
-                final_prompt_for_chat = f"{prompt}\n\n{header}{file_content_str}{footer}" if prompt else f"{header}{file_content_str}{footer}"
-            else:
-                log.warning(f"[Req {request_id}] Unsupported file type for /chat_with_file: {original_filename}")
-                final_prompt_for_chat = f"{prompt}\n\n[用户上传了文件: {original_filename} (类型: {file_ext})。此文件类型不支持内容预览。]" if prompt else f"[用户上传了文件: {original_filename} (类型: {file_ext})。不支持。]"
-        log.info(f"[Req {request_id}] Starting _task_chat_only for /chat_with_file. Model: {selected_provider}/{selected_model_id}, Img: {'Yes' if image_base64_for_chat else 'No'}")
+        parsed_pasted_images = json.loads(pasted_images_base64_json)
+        if isinstance(parsed_pasted_images, list) and all(isinstance(item, str) for item in parsed_pasted_images):
+            direct_pasted_images_base64 = parsed_pasted_images
+        elif parsed_pasted_images: # 如果不是空列表但格式不对
+             log.warning(f"[Req {form_request_id}] 'pasted_images_base64_json_array' was not a list of strings. Content: {pasted_images_base64_json[:200]}")
+    except json.JSONDecodeError:
+        if pasted_images_base64_json != "[]": # 避免空数组解析也报警告
+            log.warning(f"[Req {form_request_id}] Invalid JSON for 'pasted_images_base64_json_array'. Content: {pasted_images_base64_json[:200]}")
+
+    log.info(f"[Req {form_request_id}] Files from upload: {len(uploaded_file_objects)}, Base64 images from paste: {len(direct_pasted_images_base64)}, Prompt: '{prompt_from_user[:30]}...'")
+
+    if not prompt_from_user and not uploaded_file_objects and not direct_pasted_images_base64:
+        log.warning(f"[Req {form_request_id}] Request is empty (no prompt, files, or pasted images).")
+        return jsonify({'error': 'Request needs a prompt, files, or pasted images.', 'request_id': form_request_id}), 400
+
+    temp_file_paths_to_cleanup: List[Path] = []
+    
+    # 用于收集所有图片 (Base64格式) 和所有文本内容
+    final_all_images_base64: List[str] = list(direct_pasted_images_base64) # 直接加入粘贴的图片
+    additional_text_parts_for_prompt: List[str] = []
+
+    try:
+        if uploaded_file_objects:
+            for file_obj in uploaded_file_objects:
+                if file_obj and file_obj.filename:
+                    original_filename = secure_filename(file_obj.filename)
+                    file_ext = os.path.splitext(original_filename)[1].lower()
+                    log.debug(f"[Req {form_request_id}] Processing uploaded file '{original_filename}' (Ext: {file_ext})")
+
+                    # 使用 with 确保临时文件在作用域结束时（如果delete=True）或出错时能尝试关闭
+                    # 但我们需要路径列表，所以用 delete=False，并在 finally 中清理
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext, dir=str(SAVE_DIR.resolve())) as temp_f:
+                        file_obj.save(temp_f.name)
+                        temp_file_path = Path(temp_f.name)
+                        temp_file_paths_to_cleanup.append(temp_file_path)
+                    
+                    log.debug(f"[Req {form_request_id}] Temp file saved: {temp_file_path}")
+
+                    if file_ext in ALLOWED_IMAGE_EXT:
+                        log.debug(f"[Req {form_request_id}] Uploaded file '{original_filename}' is IMAGE. Converting to base64.")
+                        img_bytes_content = temp_file_path.read_bytes()
+                        image_base64_for_item = base64.b64encode(img_bytes_content).decode('utf-8')
+                        final_all_images_base64.append(image_base64_for_item)
+                    elif file_ext in ALLOWED_TEXT_EXT:
+                        log.debug(f"[Req {form_request_id}] Uploaded file '{original_filename}' is TEXT. Reading content.")
+                        file_content_str = temp_file_path.read_text(encoding='utf-8', errors='ignore')[:MAX_TEXT_FILE_CHARS]
+                        if len(file_content_str) == MAX_TEXT_FILE_CHARS and temp_file_path.stat().st_size > MAX_TEXT_FILE_CHARS:
+                            file_content_str += "\n[...文件内容过长，已截断...]"
+                        
+                        text_file_header = f"\n\n--- 用户上传的文本文件: {original_filename} ---\n"
+                        text_file_content = file_content_str
+                        additional_text_parts_for_prompt.append(f"{text_file_header}{text_file_content}\n--- 文件结束 ---")
+                    else:
+                        log.warning(f"[Req {form_request_id}] Unsupported uploaded file type: {original_filename}")
+                        unsupported_file_info = f"\n\n[用户上传了文件: {original_filename} (类型: {file_ext}, 不支持内容预览)]"
+                        additional_text_parts_for_prompt.append(unsupported_file_info)
+        
+        # 整合所有文本内容
+        final_prompt_for_ai = prompt_from_user
+        if additional_text_parts_for_prompt:
+            final_prompt_for_ai += "".join(additional_text_parts_for_prompt)
+            
+        log.info(f"[Req {form_request_id}] Starting AI task. Total images: {len(final_all_images_base64)}. Final prompt snippet: '{final_prompt_for_ai[:100]}...'")
+        
         socketio.start_background_task(
-            target=_task_chat_only, prompt=final_prompt_for_chat, history=history_data, request_id=request_id,
-            sid=None, use_streaming=True, model_id=selected_model_id, provider_name=selected_provider,
-            image_base64=image_base64_for_chat)
-        return jsonify({'status': 'processing', 'message': '请求已收到，AI正在后台处理...', 'request_id': request_id}), 202
-    except Exception as e_file_chat:
-        log.exception(f"[Req {request_id}] Error in /chat_with_file processing")
-        return jsonify({"error": f"处理带文件聊天时发生内部错误: {type(e_file_chat).__name__}", 'request_id': request_id}), 500
+            target=_task_chat_only,
+            prompt=final_prompt_for_ai,
+            history=history_data,
+            request_id=form_request_id,
+            sid=None, # HTTP 请求没有 sid
+            use_streaming=True, # 假设统一使用流式，或从请求参数获取
+            model_id=selected_model_id,
+            provider_name=selected_provider,
+            # **传递整合后的图片Base64列表**
+            all_images_base64=final_all_images_base64 if final_all_images_base64 else None
+        )
+        return jsonify({'status': 'processing', 'message': '请求已收到，AI正在后台处理...', 'request_id': form_request_id}), 202
+
+    except Exception as e_unified_chat:
+        log.exception(f"[Req {form_request_id}] Error in unified /chat_with_file processing")
+        return jsonify({"error": f"处理请求时发生内部错误: {type(e_unified_chat).__name__} - {str(e_unified_chat)}", 'request_id': form_request_id}), 500
     finally:
-        if temp_file_path and temp_file_path.exists():
-            try:
-                temp_file_path.unlink(missing_ok=True)
-                log.debug(f"[Req {request_id}] Cleaned up temp file {temp_file_path} from /chat_with_file.")
-            except OSError as e_unlink:
-                log.error(f"[Req {request_id}] Error deleting temp file {temp_file_path} in /chat_with_file finally: {e_unlink}")
+        for path_to_delete in temp_file_paths_to_cleanup:
+            if path_to_delete and path_to_delete.exists():
+                try:
+                    path_to_delete.unlink(missing_ok=True)
+                    log.debug(f"[Req {form_request_id}] Cleaned up temp file {path_to_delete}.")
+                except OSError as e_unlink:
+                    log.error(f"[Req {form_request_id}] Error deleting temp file {path_to_delete}: {e_unlink}")
+
 
 @app.route('/request_screenshot', methods=['POST'])
 def request_screenshot_post_route():

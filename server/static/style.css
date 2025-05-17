@@ -1170,3 +1170,33 @@ button:disabled{opacity:.65;cursor:not-allowed;transform:none!important;box-shad
 }
 #viewer-close-btn:hover{background:#000c}
 
+#ss-history-list img {
+  width: 80px;                 /* 固定宽度 */
+  height: 60px;                /* 固定高度 */
+  object-fit: cover;           /* 保持纵横比并填充区域 */
+  border-radius: 4px;          /* 圆角边框 */
+}
+
+#ss-main-preview-image {
+  display: none !important;    /* 强制隐藏图片 */
+}
+
+#ss-ai-analysis {
+  margin-top: 0.5rem;          /* 顶部添加一些空间，因为图片被隐藏 */
+  height: calc(100% - 50px);   /* 调整高度以填充可用空间 */
+}
+
+#ss-history-list .history-item-content-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: var(--card-bg, #f9f9f9);
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  cursor: pointer;             /* 明确表示项目可点击 */
+}
+#ss-ai-analysis {
+  margin-top: 0.5rem;          /* 顶部添加一些空间，因为图片被隐藏 */
+  height: calc(100% - 50px);   /* 调整高度以填充可用空间 */
+}

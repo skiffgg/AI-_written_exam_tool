@@ -24,7 +24,8 @@ let dragType = '';
 let currentImage = null; // URL of image in overlay
 let socket = null;
 let latexConversionHappened = false;
-let uploadedFile = null; // File staged for chat upload
+let uploadedFiles = []; // File staged for chat upload
+let pastedImageBase64Array = [];//用于存储粘贴的多张图片的Base64编码数组
 let mediaRecorder; // For voice recording
 let audioChunks = []; // Store audio data chunks
 let chatSessions = []; // Stores all chat session objects {id, title, history}
@@ -38,6 +39,8 @@ var currentVoiceRequestId = null; // Used by voice recording
 let md = null; // Markdown-it instance
 let ssHistory = [];
 let voiceHistory = [];
+// 全局标志：当前截图分析是否用流式
+let ssIsStreaming = false;
 
 
 const THEME_STORAGE_KEY = 'selectedAppTheme'; // 您可以选择一个合适的键名
@@ -52,7 +55,8 @@ function loadHistoriesFromStorage() {
     ssHistory    = JSON.parse(localStorage.getItem('ssHistory')     || '[]');
     voiceHistory = JSON.parse(localStorage.getItem('voiceHistory') || '[]');
 
-    ssHistory.forEach(addScreenshotHistoryItem);
+    ssHistory = JSON.parse(localStorage.getItem('ssHistory') || '[]');
+    ssHistory.forEach(item => addHistoryItem(item));
     voiceHistory.forEach(item => addVoiceHistoryItem(item, /* skipSave= */ true)); // ← 关键
   } catch (err) {
     console.warn('[Storage] load error:', err);
@@ -253,6 +257,28 @@ function loadChatSessionsFromStorage() {
         clearCurrentChatDisplay(); 
     }
 }
+
+
+// 初始化时给按钮绑定切换行为
+function initScreenshotStreamToggle() {
+  const toggleBtn = document.getElementById('ss-toggle-stream-btn');
+  toggleBtn.addEventListener('click', () => {
+    ssIsStreaming = !ssIsStreaming;
+    toggleBtn.textContent = ssIsStreaming ? '关闭流式' : '启用流式';
+
+    const analysisEl = document.getElementById('ss-ai-analysis');
+    analysisEl.innerHTML = '';  // 清空旧内容
+
+    // 通知后端：开始或停止流式推送
+    const imageUrl = analysisEl.dataset.sourceUrl;
+    if (ssIsStreaming && imageUrl) {
+      socket.emit('start_screenshot_analysis_stream', { image_url: imageUrl });
+    } else if (!ssIsStreaming && imageUrl) {
+      socket.emit('stop_screenshot_analysis_stream',  { image_url: imageUrl });
+    }
+  });
+}
+
 
 /**
  * Processes AI message by rendering markdown, LaTeX, and inserting proper elements into the DOM.
@@ -1161,158 +1187,228 @@ function initLeftPanelTopControls() {
     });
 }
 
-// --- File Upload Handling ---
+// main.js
+
 function handleFileUpload(e) {
     debugLog("File input changed (handleFileUpload).");
-    const fileInput = e.target;
+    const fileInput = e.target; // input#chat-file-upload 元素
     const uploadPreviewEl = document.getElementById('chat-upload-preview');
-    if (!uploadPreviewEl) { console.error("Chat upload preview element (#chat-upload-preview) not found."); return; }
-    uploadPreviewEl.innerHTML = '';
-    uploadedFile = null;
+
+    if (!uploadPreviewEl) {
+        console.error("Chat upload preview element (#chat-upload-preview) not found.");
+        return;
+    }
+
+    // **修改点：不再无条件清空预览区和 uploadedFiles 数组**
+    // uploadPreviewEl.innerHTML = ''; // 注释掉或移除
+    // uploadedFiles = [];         // 注释掉或移除
+
     if (fileInput.files && fileInput.files.length > 0) {
-        const file = fileInput.files[0];
-        uploadedFile = file;
-        debugLog(`File selected: ${file.name}, Size: ${file.size}`);
-        const previewItem = document.createElement('div');
-        previewItem.className = 'preview-item';
-        const displayName = file.name.length > 40 ? file.name.substring(0, 37) + '...' : file.name;
-        previewItem.innerHTML = `<div class="file-info" title="${escapeHtml(file.name)}"><i class="fas fa-file"></i><span>${escapeHtml(displayName)} (${formatFileSize(file.size)})</span></div><button type="button" class="remove-file" title="取消选择此文件"><i class="fas fa-times"></i></button>`;
-        previewItem.querySelector('.remove-file').onclick = () => {
-            debugLog(`Removing file preview: ${file.name}`);
-            uploadPreviewEl.innerHTML = ''; uploadedFile = null; fileInput.value = '';
-        };
-        uploadPreviewEl.appendChild(previewItem);
-    } else { debugLog("File selection cancelled or no file chosen."); }
+        debugLog(`Number of new files selected: ${fileInput.files.length}`);
+
+        for (let i = 0; i < fileInput.files.length; i++) {
+            const file = fileInput.files[i];
+
+            // **新增：检查文件是否已存在于 uploadedFiles 数组中，避免重复添加**
+            // （基于文件名和大小的简单检查，更严格的检查可能需要比较文件内容或最后修改时间）
+            const alreadyExists = uploadedFiles.some(existingFile =>
+                existingFile.name === file.name && existingFile.size === file.size
+            );
+
+            if (alreadyExists) {
+                debugLog(`File already in list, skipping: ${file.name}`);
+                continue; // 跳过已存在的文件
+            }
+
+            uploadedFiles.push(file); // 将当前文件添加到 uploadedFiles 数组
+            debugLog(`File added to list: ${file.name}, Size: ${formatFileSize(file.size)}, Type: ${file.type}`);
+
+            // --- 创建并显示每个文件的预览项 ---
+            const previewItem = document.createElement('div');
+            previewItem.className = 'preview-item d-flex justify-content-between align-items-center mb-1 p-1 border rounded';
+            // 使用文件在数组中的索引作为移除时的唯一标识，比文件名更可靠
+            previewItem.dataset.fileIndexToRemove = uploadedFiles.length - 1; // 当前文件在数组中的索引
+
+            const fileInfo = document.createElement('div');
+            fileInfo.className = 'file-info text-truncate me-2';
+
+            let iconClass = 'fas fa-file me-2';
+            if (file.type.startsWith('image/')) iconClass = 'fas fa-file-image me-2';
+            else if (file.type.startsWith('text/')) iconClass = 'fas fa-file-alt me-2';
+            else if (file.type === 'application/pdf') iconClass = 'fas fa-file-pdf me-2';
+
+            const displayName = file.name.length > 25 ? file.name.substring(0, 22) + '...' : file.name;
+            fileInfo.innerHTML = `<i class="${iconClass}"></i><span title="${escapeHtml(file.name)}">${escapeHtml(displayName)} (${formatFileSize(file.size)})</span>`;
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'btn-close btn-sm';
+            removeBtn.setAttribute('aria-label', 'Remove file');
+            removeBtn.title = '移除此文件';
+
+            removeBtn.onclick = (event) => {
+                event.stopPropagation();
+                // const indexToRemove = parseInt(previewItem.dataset.fileIndexToRemove, 10); // 旧方法，如果DOM顺序变了就不准
+                // 从DOM中找到对应预览项，然后找到其在当前 uploadedFiles 数组中的真实索引
+                const currentPreviewItems = Array.from(uploadPreviewEl.children);
+                const domIndex = currentPreviewItems.indexOf(previewItem); // 获取当前项在DOM中的索引
+
+                if (domIndex > -1 && domIndex < uploadedFiles.length) { // 确保索引有效
+                    const removedFile = uploadedFiles.splice(domIndex, 1); // 根据DOM顺序移除
+                    debugLog(`File removed from array: ${removedFile[0]?.name}. Remaining files: ${uploadedFiles.length}`);
+                } else {
+                    debugLog(`Could not accurately determine file to remove by DOM index.`);
+                }
+
+                previewItem.remove();
+
+                // 更新后续预览项的 data-file-index-to-remove (如果使用基于索引的移除)
+                // 或者，更简单的方式是在移除时直接从数组中按文件名或其他唯一标识查找。
+                // 当前的 splice(domIndex, 1) 已经处理了数组。
+
+                if (uploadedFiles.length === 0) {
+                    fileInput.value = '';
+                }
+                debugLog("Updated uploadedFiles array:", uploadedFiles.map(f => f.name));
+            };
+
+            previewItem.appendChild(fileInfo);
+            previewItem.appendChild(removeBtn);
+            uploadPreviewEl.appendChild(previewItem); // 追加到预览区
+        }
+    } else {
+        debugLog("File selection dialog was cancelled or no file chosen by user this time.");
+    }
+
+    // **重要：为了让下一次选择相同文件也能触发 change 事件，需要在处理完后清空原生文件输入框的值。**
+    // 否则，如果用户选择了一批文件，然后再次点击“+”号并选择完全相同的一批文件，change 事件可能不会触发。
+    fileInput.value = ''; // 放在这里，确保每次选择操作后都清空
+    console.log("Final uploadedFiles after this selection:", uploadedFiles.map(f => f.name));
 }
 
 // --- History & UI Update Functions ---
-// 修改后的 addHistoryItem (用于截图历史记录显示)
+/**
+ * 向截图历史列表中插入一条记录。
+ * @param {{ image_url: string, analysis?: string, prompt?: string, timestamp?: number, provider?: string }} item
+ */
 function addHistoryItem(item) {
-    const historyListEl = document.getElementById('ss-history-list');
-    if (!historyListEl || !item || !item.image_url) {
-        console.warn("Cannot add screenshot history item, list element or item data missing.", item);
-        return;
+  const historyListEl = document.getElementById('ss-history-list');
+  if (!historyListEl || !item || !item.image_url) {
+    console.warn("Cannot add screenshot history item, missing list element or item data.", item);
+    return;
+  }
+
+  // 如果已存在，则只更新 analysis 并返回
+  const existingLi = historyListEl.querySelector(`li[data-url="${item.image_url}"]`);
+  if (existingLi) {
+    console.log(`Screenshot history item for ${item.image_url} already exists; updating if analysis changed.`);
+    if (typeof item.analysis === 'string' && existingLi.dataset.analysis !== item.analysis) {
+      existingLi.dataset.analysis = item.analysis;
+      // 如果当前正在展示这张截图，也同步更新右侧分析
+      const analysisEl = document.getElementById('ss-ai-analysis');
+      if (analysisEl && analysisEl.dataset.sourceUrl === item.image_url) {
+        analysisEl.innerHTML = '';
+        const container = document.createElement('div');
+        container.className = 'message-content';
+        processAIMessage(container, item.analysis, 'history_item_analysis_update');
+        analysisEl.appendChild(container);
+        renderLatexInElement(analysisEl);
+      }
     }
+    return;
+  }
 
-    if (historyListEl.querySelector(`li[data-url="${item.image_url}"]`)) {
-        console.log(`Screenshot history item for ${item.image_url} already exists. Updating analysis if newer.`);
-        const existingLi = historyListEl.querySelector(`li[data-url="${item.image_url}"]`);
-        if (existingLi && typeof item.analysis === 'string' && existingLi.dataset.analysis !== item.analysis) {
-            existingLi.dataset.analysis = item.analysis;
-            const mainAnalysisEl = document.getElementById('ss-ai-analysis');
-            if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === item.image_url) {
-                mainAnalysisEl.innerHTML = '';
-                const analysisContentDiv = document.createElement('div');
-                analysisContentDiv.className = 'message-content';
-                if (typeof processAIMessage === 'function') {
-                    const tempAiMessageDiv = document.createElement('div');
-                    tempAiMessageDiv.className = 'ai-message';
-                    tempAiMessageDiv.dataset.provider = item.provider || 'AI';
-                    processAIMessage(tempAiMessageDiv, item.analysis, 'history_item_analysis_update');
-                    while (tempAiMessageDiv.firstChild) {
-                        analysisContentDiv.appendChild(tempAiMessageDiv.firstChild);
-                    }
-                } else {
-                    analysisContentDiv.textContent = item.analysis || '(processAIMessage 未定义)';
-                }
-                mainAnalysisEl.appendChild(analysisContentDiv);
-            }
-        }
+  // 1. 更新内存和 localStorage
+  ssHistory.unshift(item);
+  saveScreenshotHistory();
 
-        // ssHistory.unshift(item);                      // ② 放到数组（想让旧的在前就用 push）
-        // saveScreenshotHistory();                      // ③ 写回 localStorage
-        // historyListEl.insertBefore(li, historyListEl.firstChild);  // ④ 插到 DOM
-        return;
+  // 2. 构造 <li> 及其子元素
+  const li = document.createElement('li');
+  li.className = 'history-item';
+  li.setAttribute('data-url', item.image_url);
+  li.dataset.analysis  = item.analysis  || '';
+  li.dataset.prompt    = item.prompt    || '';
+  li.dataset.timestamp = String(item.timestamp || Date.now() / 1000);
+  li.dataset.provider  = item.provider  || 'unknown';
 
-    }
-    ssHistory.unshift(item);     // 最新在最前；用 push 就改成 push
-    saveScreenshotHistory();     // 写回 localStorage
+  // 内容包装器
+  const contentWrapper = document.createElement('div');
+  contentWrapper.className = 'history-item-content-wrapper';
 
-    const li = document.createElement('li');
-    li.className = 'history-item';
-    li.setAttribute('data-url', item.image_url);
-    li.dataset.analysis = item.analysis || '';
-    li.dataset.prompt = item.prompt || 'Describe this screenshot and highlight anything unusual.';
-    li.dataset.timestamp = String(item.timestamp || (Date.now() / 1000));
-    li.dataset.provider = item.provider || 'unknown';
+  // 缩略图 <img>
+  const img = document.createElement('img');
+  img.src     = item.image_url + '?t=' + Date.now();  // 防缓存
+  img.alt     = '历史截图缩略图';
+  img.loading = 'lazy';
+  img.onerror = () => {
+    const errDiv = document.createElement('div');
+    errDiv.className = 'history-error';
+    errDiv.textContent = '图片加载失败';
+    contentWrapper.replaceChild(errDiv, img);
+  };
+  contentWrapper.appendChild(img);
 
-    const contentWrapper = document.createElement('div');
-    contentWrapper.className = 'history-item-content-wrapper';
+  // 时间戳
+  const tsDiv = document.createElement('div');
+  tsDiv.className = 'history-item-text';
+  const date = new Date(parseFloat(li.dataset.timestamp) * 1000);
+  tsDiv.textContent = date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
+  tsDiv.title = date.toLocaleString();
+  contentWrapper.appendChild(tsDiv);
 
-    const img = document.createElement('img');
-    img.src = item.image_url + '?t=' + Date.now();
-    img.alt = '历史截图缩略图';
-    img.loading = 'lazy';
-    const timestampDivForError = document.createElement('div');
-
-    img.onerror = () => {
-        const errorDiv = document.createElement('div');
-        errorDiv.className = 'history-error';
-        errorDiv.textContent = '图片加载失败';
-        if (img.parentNode) {
-            img.parentNode.replaceChild(errorDiv, img);
-        } else {
-            li.insertBefore(errorDiv, timestampDivForError);
-        }
-    };
-
-    const timestampDiv = timestampDivForError;
-    timestampDiv.className = 'history-item-text';
-    const date = new Date(parseFloat(li.dataset.timestamp) * 1000);
-    timestampDiv.textContent = date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short', hour12: false });
-    timestampDiv.title = date.toLocaleString();
-
-    contentWrapper.appendChild(img);
-    contentWrapper.appendChild(timestampDiv);
-
-    const actionsContainer = document.createElement('div');
-    actionsContainer.className = 'history-item-actions';
-
-    if (typeof createDeleteButton === 'function') {
-        const deleteBtn = createDeleteButton(() => {
-              // 1. 删数组
-            ssHistory = ssHistory.filter(h => h.image_url !== item.image_url);
-            // 2. 删 DOM
-            li.remove();
-            // 3. 保存
-            saveScreenshotHistory();
-        });
-        actionsContainer.appendChild(deleteBtn);
-    }
-
-    li.appendChild(contentWrapper);
-    li.appendChild(actionsContainer);
-
-    li.addEventListener('click', (e) => {
-        if (e.target.closest('.history-item-actions')) {
-            return;
-        }
-
-        showViewerOverlay(item.image_url);
-
-        // ② 把大图塞进右侧（可以 display:none，只做数据容器）
-        const preview = document.getElementById('ss-main-preview-image');
-        if (preview) {
-            preview.src= item.image_url;
-            preview.dataset.currentUrl = item.image_url;
-            document.getElementById('ss-crop-current-btn')?.style.removeProperty('display');
-        }
-
-        // ③ 把服务器返回的分析（若已存在）直接填到右侧
-        if (typeof item.analysis === 'string') {
-            const analysisEl = document.getElementById('ss-ai-analysis');
-            if (analysisEl) {
-                analysisEl.dataset.sourceUrl = item.image_url;
-                analysisEl.innerHTML = md.render(item.analysis);       // ← Markdown
-                renderLatexInElement(analysisEl);                      // ← KaTeX
-                analysisEl.innerHTML = md.render(item.analysis || '');
-                renderLatexInElement(analysisEl);
-            }
-        }
+  // 操作按钮容器
+  const actionsDiv = document.createElement('div');
+  actionsDiv.className = 'history-item-actions';
+  if (typeof createDeleteButton === 'function') {
+    const deleteBtn = createDeleteButton(() => {
+      // 从数组中移除
+      ssHistory = ssHistory.filter(h => h.image_url !== item.image_url);
+      saveScreenshotHistory();
+      // 从 DOM 中移除
+      li.remove();
     });
+    actionsDiv.appendChild(deleteBtn);
+  }
 
-    historyListEl.insertBefore(li, historyListEl.firstChild);
+  // 组装并插入列表
+  li.appendChild(contentWrapper);
+  li.appendChild(actionsDiv);
+  historyListEl.prepend(li);
+
+  // 3. 点击事件：打开大图 + 渲染已有分析
+  li.addEventListener('click', e => {
+    // 如果点在删除按钮上，忽略
+    if (e.target.closest('.history-item-actions')) return;
+
+    // 打开查看大图的 Overlay
+    showViewerOverlay(item.image_url);
+
+    // 可选：更新右侧预览图（如你不需要，可以注释以下三行）
+    const previewImg = document.getElementById('ss-main-preview-image');
+    if (previewImg) {
+      previewImg.src             = item.image_url;
+      previewImg.dataset.currentUrl = item.image_url;
+      previewImg.style.display   = 'block';
+      document.getElementById('ss-crop-current-btn')?.style.removeProperty('display');
+    }
+
+    // 如果已有分析，则渲染到右侧分析区
+    if (typeof item.analysis === 'string') {
+      const analysisEl = document.getElementById('ss-ai-analysis');
+      if (analysisEl) {
+        analysisEl.dataset.sourceUrl = item.image_url;
+        analysisEl.innerHTML = '';
+        const div = document.createElement('div');
+        div.className = 'message-content';
+        // 渲染 Markdown + 流式兼容
+        div.innerHTML = md.render(item.analysis);
+        renderLatexInElement(analysisEl);
+        analysisEl.appendChild(div);
+      }
+    }
+  });
 }
+
 
 function showViewerOverlay(url) {
   const overlay = document.getElementById('viewer-overlay');
@@ -1429,37 +1525,57 @@ function initBaseButtonHandlers() {
 /* =========================================================
    图片发送 – 只预览，不立即发送
    ========================================================= */
+// main.js (文件末尾的 IIFE - 修改后，粘贴逻辑将调用 handleFileUpload)
 (function initImageInput() {
-  const chatInput  = document.getElementById('chat-chat-input');
-  const fileInput  = document.getElementById('chat-file-upload');
-  const previewEl  = document.getElementById('chat-upload-preview');
-  if (!chatInput || !fileInput || !previewEl) return;
+  const chatInputEl = document.getElementById('chat-chat-input');
+  const fileInputEl = document.getElementById('chat-file-upload'); // 用于清空 value
 
-  // =========== 1. 粘贴 ===========
-  chatInput.addEventListener('paste', e => {
-    const fItem = [...e.clipboardData.items]
-      .find(it => it.kind === 'file' && it.type.startsWith('image/'));
-    if (!fItem) return;
-    e.preventDefault();
-    const file = fItem.getAsFile();
-    if (file) stageImage(file);
-  });
-
-  // =========== 2. 选择文件 ===========
-  fileInput.addEventListener('change', e => {
-    const file = e.target.files?.[0];
-    if (file) stageImage(file);
-    e.target.value = '';           // 清空选择
-  });
-
-  // =========== 3. 预览并缓存 ===========
-  function stageImage(file) {
-    uploadedFile = file;           // ✨ 关键：缓存到全局
-    const urlObj = URL.createObjectURL(file);
-    previewEl.innerHTML =
-      `<img src="${urlObj}" style="max-width:120px;max-height:120px;
-        border:1px solid var(--bs-border-color);border-radius:4px;">`;
+  if (!chatInputEl || !fileInputEl) {
+    console.warn("initImageInput: chatInput or fileInput element not found. Paste functionality might be affected.");
+    return;
   }
+
+  // =========== 1. 粘贴图片处理 ===========
+  chatInputEl.addEventListener('paste', e => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const pastedFilesFromClipboard = [];
+    for (const item of items) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        e.preventDefault(); // 阻止默认的粘贴行为（如将图片作为文本插入）
+        const file = item.getAsFile();
+        if (file) {
+          // 为了区分粘贴的文件和选择的文件（如果需要），可以给文件名加个前缀
+          // Object.defineProperty(file, 'name', { writable: true, value: `pasted_${file.name}` });
+          pastedFilesFromClipboard.push(file);
+        }
+      }
+    }
+
+    if (pastedFilesFromClipboard.length > 0) {
+      debugLog(`Processing ${pastedFilesFromClipboard.length} image(s) from paste.`);
+
+      // 使用 DataTransfer 来创建一个 FileList，以便 handleFileUpload 可以处理
+      const dataTransfer = new DataTransfer();
+      pastedFilesFromClipboard.forEach(file => dataTransfer.items.add(file));
+
+
+      const mockFileInputTarget = { files: dataTransfer.files };
+      handleFileUpload({ target: mockFileInputTarget }); // 调用统一的文件处理与预览函数
+
+  
+      pastedImageBase64Array = [];
+      if (window.pastedImageBase64) window.pastedImageBase64 = null;
+
+    }
+  });
+
+  // =========== 2. 选择文件 (相关的 change 事件监听器已在 initAllFeatures 中由 handleFileUpload 处理) ===========
+  // 该 IIFE 不再需要监听 fileInput 的 'change' 事件
+
+  // =========== 3. stageImage 函数 (不再需要，其功能已由粘贴逻辑调用 handleFileUpload 实现) ===========
+  // function stageImage(file) { ... } // 可以安全删除此函数
 })();
 
 
@@ -1516,10 +1632,13 @@ function initAllFeatures() {
     const fileInput = document.getElementById('chat-file-upload');
     const attachBtn = document.getElementById('chat-attach-file-btn');
 
-    attachBtn.addEventListener('click', () => {
-    // 直接打开文件选择框
-    fileInput.click();
+
+    attachBtn.addEventListener('click', function(e) {
+    // 只处理用户真实点击
+    if (!e.isTrusted) return;
+    // fileInput.click();
     });
+
 
     // 仍然监听 change 事件进行预览
     fileInput.addEventListener('change', handleFileUpload);
@@ -1551,6 +1670,7 @@ function initAllFeatures() {
   initLeftPanelTopControls(); // NEW: Initialize top controls for left panels
   initBaseButtonHandlers();
   initVoiceFeature();
+  initScreenshotStreamToggle();
 
   // Render LaTeX in message content and analysis sections
   if (typeof renderLatexInElement === 'function') {
@@ -1657,6 +1777,123 @@ function renderChatHistory(historyArray) {
     scrollToChatBottom(chatHistoryEl);
 }
 
+// main.js (可以放在其他辅助函数附近)
+
+/**
+ * 在指定的聊天历史元素中追加一条系统消息或错误提示。
+ * @param {string} message 要显示的消息文本。
+ * @param {HTMLElement} chatHistoryElRef 可选，聊天历史的DOM元素。如果未提供，则尝试获取 #chat-chat-history。
+ * @param {string} messageType 可选，消息类型，用于CSS样式，例如 'error', 'info', 'success'。默认为 'system' 或 'error'。
+ */
+function appendSystemMessage(message, chatHistoryElRef, messageType = 'system') {
+    const chatHistoryElement = chatHistoryElRef || document.getElementById('chat-chat-history');
+    if (!chatHistoryElement) {
+        console.error("appendSystemMessage: Chat history element not found.");
+        return;
+    }
+
+    const messageDiv = document.createElement('div');
+    // 根据 messageType 设置不同的CSS类，以便自定义样式
+    if (messageType === 'error') {
+        messageDiv.className = 'system-message error-text p-2 my-1 text-danger border border-danger rounded bg-light-danger'; // 示例CSS类
+    } else if (messageType === 'info') {
+        messageDiv.className = 'system-message info-text p-2 my-1 text-info border border-info rounded bg-light-info';
+    } else { // 'system' or default
+        messageDiv.className = 'system-message p-2 my-1 text-muted'; // 默认的系统消息样式
+    }
+    messageDiv.textContent = message;
+
+    chatHistoryElement.appendChild(messageDiv);
+    if (typeof scrollToChatBottom === "function") { // 确保 scrollToChatBottom 已定义
+        scrollToChatBottom(chatHistoryElement);
+    }
+}
+
+// 您可能已经在 style.css 中有 .system-message 和 .error-text 的样式
+// 如果没有，可以添加一些基础样式，例如：
+/*
+In style.css:
+.system-message {
+    font-size: 0.85em;
+    text-align: center;
+    margin: 0.5rem auto;
+    padding: 0.25rem 0.5rem;
+    max-width: 80%;
+    color: var(--system-message-text-color, #6c757d);
+}
+.error-text {
+    color: var(--error-message-text-color, #842029) !important;
+    background-color: var(--error-message-bg, #f8d7da);
+    border: 1px solid var(--error-message-border-color, #f5c2c7);
+    border-radius: var(--bs-border-radius-sm, 0.2rem);
+}
+.info-text {
+    color: #0c5460 !important;
+    background-color: #d1ecf1;
+    border: 1px solid #bee5eb;
+    border-radius: var(--bs-border-radius-sm, 0.2rem);
+}
+*/
+
+// main.js (可以放在其他与聊天会话UI相关的函数附近)
+
+/**
+ * 在左侧的聊天会话列表中，高亮显示指定的会话项，并取消其他项的高亮。
+ * @param {string | number | null} sessionId 要激活的会话的ID。如果为 null，则取消所有高亮。
+ */
+function setActiveChatSessionUI(sessionId) {
+    const sessionListEl = document.getElementById('chat-session-list');
+    if (!sessionListEl) {
+        // console.warn("setActiveChatSessionUI: Session list element (#chat-session-list) not found.");
+        return;
+    }
+
+    // 移除所有现有会话项的 'active-session' 类
+    const currentActiveItems = sessionListEl.querySelectorAll('.history-item.active-session');
+    currentActiveItems.forEach(item => {
+        item.classList.remove('active-session');
+    });
+
+    // 如果提供了有效的 sessionId，则给对应的会话项添加 'active-session' 类
+    if (sessionId !== null && sessionId !== undefined) {
+        // 构建选择器时要注意 sessionId 的类型，如果它是数字，直接用模板字符串可能没问题，
+        // 但如果包含特殊字符或纯数字，确保CSS选择器有效。
+        // 使用CSS.escape() 可以更安全，但需要浏览器支持。
+        // let escapedSessionId;
+        // try {
+        //     escapedSessionId = CSS.escape(String(sessionId));
+        // } catch (e) {
+        //     escapedSessionId = String(sessionId).replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1'); // 简单转义
+        // }
+        // const newActiveItem = sessionListEl.querySelector(`.history-item[data-session-id="${escapedSessionId}"]`);
+
+        // 通常情况下，session ID 是UUID字符串或时间戳数字，可以直接用
+        const newActiveItem = sessionListEl.querySelector(`.history-item[data-session-id="${String(sessionId)}"]`);
+
+        if (newActiveItem) {
+            newActiveItem.classList.add('active-session');
+            // 可选：将激活的项滚动到视图中 (如果列表是可滚动的)
+            // newActiveItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+            // console.warn(`setActiveChatSessionUI: No session item found with ID: ${sessionId}`);
+        }
+    }
+}
+
+// 确保您在 style.css 中有 .active-session 类的样式，例如：
+/*
+In style.css:
+.history-item.active-session {
+    background-color: var(--history-item-active-bg, #e0e7ff) !important;
+    border-left-color: var(--history-item-active-border-color, var(--primary-color, #0d6efd)) !important;
+    font-weight: bold;
+}
+.history-item.active-session .history-item-content-wrapper > div:first-child {
+    color: var(--panel-title-text-color, var(--primary-color, #0d6efd));
+}
+*/
+
+
 
 
 // 修改后的 addChatHistoryItem (AI 对话历史)
@@ -1758,6 +1995,56 @@ function bumpActiveChatSessionToTop() {
 }
 
 
+  // —— 确保历史条并返回它 —— 
+function ensureHistoryItem(url, analysis='') {
+  const list = document.getElementById('ss-history-list');
+  let li = list.querySelector(`li[data-url="${url}"]`);
+  if (!li) {
+    li = document.createElement('li');
+    li.dataset.url = url;
+    li.addEventListener('click', () => selectHistoryItem(li, { image_url: url, analysis }));
+    const thumb = document.createElement('img');
+    thumb.src = url; thumb.alt = '缩略';
+    li.appendChild(thumb);
+    list.prepend(li);
+  }
+  li.dataset.analysis = analysis;
+  return li;
+}
+
+// —— 切面板到“截图分析” —— 
+function switchToScreenshotPanel() {
+  // 导航按钮高亮
+  document.querySelectorAll('.nav-dropdown-item.active')
+    .forEach(el => el.classList.remove('active'));
+  document.querySelector('.nav-dropdown-item[data-feature="screenshot-analysis"]')
+    .classList.add('active');
+  // 左右面板显示隐藏
+  document.querySelectorAll('.feature-content-block')
+    .forEach(el => el.classList.remove('active'));
+  document.getElementById('left-panel-screenshot-analysis').classList.add('active');
+  document.getElementById('right-panel-screenshot-analysis').classList.add('active');
+}
+
+// —— 选中历史并渲染分析 —— 
+function selectHistoryItem(li, { image_url, analysis }) {
+  // 左侧高亮
+  const list = document.getElementById('ss-history-list');
+  list.querySelectorAll('li.selected').forEach(el => el.classList.remove('selected'));
+  li.classList.add('selected');
+
+  // 渲染右侧
+  const mainEl = document.getElementById('ss-ai-analysis');
+  mainEl.dataset.sourceUrl = image_url;
+  mainEl.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'message-content';
+  processAIMessage(div, analysis||'无分析内容', 'analysis_result');
+  mainEl.appendChild(div);
+  if (typeof renderLatexInElement==='function') renderLatexInElement(mainEl);
+}
+
+
 function initSocketIO() {
     socket = io({
         path: '/socket.io',
@@ -1778,54 +2065,54 @@ function initSocketIO() {
         if (statusEl) statusEl.textContent = '连接失败: ' + error.message;
     });
 
-    // 流式响应处理
-socket.on('chat_stream_chunk', data => {
-  const chatHistoryEl = document.getElementById('chat-chat-history');
-  if (!chatHistoryEl) return;
+        // 流式响应处理
+    socket.on('chat_stream_chunk', data => {
+    const chatHistoryEl = document.getElementById('chat-chat-history');
+    if (!chatHistoryEl) return;
 
-  // 1. 找 aiDiv（非 thinking 状态）
-  let aiDiv = chatHistoryEl.querySelector(`.ai-message[data-request-id="${data.request_id}"]`);
+    // 1. 找 aiDiv（非 thinking 状态）
+    let aiDiv = chatHistoryEl.querySelector(`.ai-message[data-request-id="${data.request_id}"]`);
 
-  // 2. 如果不存在，就移除 thinking、创建 aiDiv 和内容容器
-  if (!aiDiv) {
-    const thinkingEl = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${data.request_id}"]`);
-    if (thinkingEl) removeThinkingIndicator(chatHistoryEl, thinkingEl);
+    // 2. 如果不存在，就移除 thinking、创建 aiDiv 和内容容器
+    if (!aiDiv) {
+        const thinkingEl = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${data.request_id}"]`);
+        if (thinkingEl) removeThinkingIndicator(chatHistoryEl, thinkingEl);
 
-    aiDiv = document.createElement('div');
-    aiDiv.className = 'ai-message';
-    aiDiv.dataset.requestId = data.request_id;
-    if (data.provider) aiDiv.dataset.provider = data.provider;
+        aiDiv = document.createElement('div');
+        aiDiv.className = 'ai-message';
+        aiDiv.dataset.requestId = data.request_id;
+        if (data.provider) aiDiv.dataset.provider = data.provider;
 
-    // 创建内容容器
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'message-content';
-    aiDiv.appendChild(contentDiv);
+        // 创建内容容器
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        aiDiv.appendChild(contentDiv);
 
-    // 初始化 buffer
-    aiDiv._streamBuffer = '';
+        // 初始化 buffer
+        aiDiv._streamBuffer = '';
 
-    chatHistoryEl.appendChild(aiDiv);
-  }
+        chatHistoryEl.appendChild(aiDiv);
+    }
 
-  // 3. 确保 contentDiv 一定存在
-  let contentDiv = aiDiv.querySelector('.message-content');
-  if (!contentDiv) {
-    contentDiv = document.createElement('div');
-    contentDiv.className = 'message-content';
-    aiDiv.appendChild(contentDiv);
-    aiDiv._streamBuffer = aiDiv._streamBuffer || '';
-  }
+    // 3. 确保 contentDiv 一定存在
+    let contentDiv = aiDiv.querySelector('.message-content');
+    if (!contentDiv) {
+        contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        aiDiv.appendChild(contentDiv);
+        aiDiv._streamBuffer = aiDiv._streamBuffer || '';
+    }
 
-  // 4. 累积 chunk 到 buffer
-  aiDiv._streamBuffer += data.chunk || '';
+    // 4. 累积 chunk 到 buffer
+    aiDiv._streamBuffer += data.chunk || '';
 
-  // 5. 实时 Markdown + KaTeX 渲染
-  contentDiv.innerHTML = md.render(aiDiv._streamBuffer);
-  renderLatexInElement(contentDiv);
+    // 5. 实时 Markdown + KaTeX 渲染
+    contentDiv.innerHTML = md.render(aiDiv._streamBuffer);
+    renderLatexInElement(contentDiv);
 
-  // 6. 滚到底部
-  scrollToChatBottom(chatHistoryEl);
-});
+    // 6. 滚到底部
+    scrollToChatBottom(chatHistoryEl);
+    });
 
 
 
@@ -1999,34 +2286,81 @@ socket.on('chat_stream_chunk', data => {
     }
 });
 
-    socket.on('analysis_result', function(data) {
-        console.log('<<<<< [Socket RECEIVED] analysis_result >>>>>', data);
-        // data 预期格式: { request_id: "?", image_url: "...", analysis: "...", provider: "...", prompt: "...", timestamp: ... }
-        // 这个事件通常是在特定分析任务（如裁剪后分析，或初始上传后的分析）完成后发送的。
-        // new_screenshot 事件可能已经包含了初始分析。你需要协调这两个事件。
+    socket.on('new_screenshot', function(data) {
+    console.log('<<<<< [Socket RECEIVED] new_screenshot >>>>>', data);
+    // data 预期格式: { image_url: "...", analysis: "...", prompt: "...", timestamp: ..., provider: "..." }
 
-        // 主要用途：如果用户正在查看某个截图，并且这个截图的分析结果更新了，则更新主显示区域。
+    if (typeof addHistoryItem === 'function') {
+        addHistoryItem(data); // addHistoryItem 会创建列表项并处理点击事件
+    } else {
+        console.warn("Function addHistoryItem is not defined. Cannot add to screenshot history.");
+    }
+
+    // 可选：如果你希望新截图立即显示在主区域（而不仅仅是添加到历史列表）
+    // 通常是点击历史条目才显示在主区域，但这里提供一个立即显示的选择
+    const shouldDisplayImmediately = false; // 改为 true 如果你想立即显示
+    if (shouldDisplayImmediately) {
         const mainAnalysisEl = document.getElementById('ss-ai-analysis');
-        if (mainAnalysisEl && mainAnalysisEl.dataset.sourceUrl === data.image_url) {
-            console.log(`Updating main analysis display for ${data.image_url} due to 'analysis_result' event.`);
+        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
+
+        if (mainAnalysisEl) {
             mainAnalysisEl.innerHTML = ''; // 清空
             const analysisContentDiv = document.createElement('div');
             analysisContentDiv.className = 'message-content';
-            processAIMessage(analysisContentDiv, data.analysis || 'AI分析结果为空。', 'analysis_result_update');
+            processAIMessage(analysisContentDiv, data.analysis || 'AI分析完成，但无文本结果。', 'new_screenshot_immediate_analysis');
             mainAnalysisEl.appendChild(analysisContentDiv);
+            mainAnalysisEl.dataset.sourceUrl = data.image_url;
         }
+        if (mainImagePreviewEl) {
+            mainImagePreviewEl.src = data.image_url + '?t=' + Date.now();
+            mainImagePreviewEl.alt = `截图预览 - ${new Date((data.timestamp || Date.now()/1000) * 1000).toLocaleString()}`;
+            mainImagePreviewEl.style.display = 'block';
+        }
+    }
+});
 
-        // 你可能还需要更新 historyList 中对应条目的 data-analysis 属性，
-        // 这样如果用户之后再点击这个历史条目，能看到最新的分析。
-        const historyListEl = document.getElementById('ss-history-list');
-        if (historyListEl) {
-            const listItem = historyListEl.querySelector(`li[data-url="${data.image_url}"]`);
-            if (listItem) {
-                listItem.dataset.analysis = data.analysis || '';
-                console.log(`Updated data-analysis for history item ${data.image_url}`);
-            }
+    socket.on('analysis_stream_chunk', chunk => {
+        // 只在开启流式时处理
+        if (!ssIsStreaming) return;
+
+        const analysisEl = document.getElementById('ss-ai-analysis');
+        // 如果这是流的第一块，先调用一次 processAIMessage 来初始化容器
+        if (!analysisEl.querySelector('.message-content')) {
+        const container = document.createElement('div');
+        container.className = 'message-content';
+        analysisEl.appendChild(container);
+        // processAIMessage 也支持以空字符串开头
+        processAIMessage(container, '', 'analysis_stream');
         }
+        // 追加新内容
+        const container = analysisEl.querySelector('.message-content');
+        processAIMessage(container, chunk.text, 'analysis_stream');
     });
+
+  // 3. 非流式一次性结果
+  socket.on('analysis_result', data => {
+    if (ssIsStreaming) return;
+    console.log('[Socket] analysis_result', data);
+
+    // 3.1 切到截图分析面板
+    switchToScreenshotPanel();
+
+    // 3.2 更新主预览图 + 裁剪按钮
+    // const img = document.getElementById('ss-main-preview-image');
+    // img.src = data.image_url;
+    // img.dataset.currentUrl = data.image_url;
+    // img.style.display = 'block';
+    // document.getElementById('ss-main-preview-placeholder').style.display = 'none';
+    document.getElementById('ss-crop-current-btn').style.display = 'inline-block';
+
+    // 3.3 确保历史列表并更新
+    const li = ensureHistoryItem(data.image_url, data.analysis);
+    // 自动渲染
+    selectHistoryItem(li, data);
+  });
+
+
+
 
     socket.on('analysis_error', function(data) {
         console.error('<<<<< [Socket RECEIVED] analysis_error >>>>>', data);
@@ -2257,19 +2591,19 @@ socket.on('chat_stream_chunk', data => {
     });
 
 
-socket.on('chat_error', function(data) {
-    console.error('[Socket] Chat error:', data.error);
-    const chatHistoryEl = document.getElementById('chat-chat-history');
-    if (!chatHistoryEl) return;
+    socket.on('chat_error', function(data) {
+        console.error('[Socket] Chat error:', data.error);
+        const chatHistoryEl = document.getElementById('chat-chat-history');
+        if (!chatHistoryEl) return;
 
-    const errorDiv = document.createElement('div');
-    errorDiv.className = 'system-message';
-    errorDiv.textContent = 'Error: ' + (data.error || 'An error occurred while processing your request.');
-    chatHistoryEl.appendChild(errorDiv);
-    scrollToChatBottom(chatHistoryEl);
-});
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'system-message';
+        errorDiv.textContent = 'Error: ' + (data.error || 'An error occurred while processing your request.');
+        chatHistoryEl.appendChild(errorDiv);
+        scrollToChatBottom(chatHistoryEl);
+    });
 
-}
+    }
 
 
 
@@ -2582,7 +2916,7 @@ function clearCurrentChatDisplay(isNewSessionStart = false){
         // 清空文件上传预览
         const uploadPreviewEl = document.getElementById('chat-upload-preview');
         if (uploadPreviewEl) uploadPreviewEl.innerHTML = '';
-        uploadedFile = null;
+        uploadedFiles = null;
         
         // 重置文件输入
         const fileInputEl = document.getElementById('chat-file-upload');
@@ -2765,7 +3099,10 @@ function confirmCrop() {
 
 
 // Make sure initAllFeatures is the last thing called or is wrapped in DOMContentLoaded
-document.addEventListener('DOMContentLoaded', initAllFeatures);
+document.addEventListener('DOMContentLoaded', () => {
+  initAllFeatures();
+});
+
 
 
 
@@ -2774,132 +3111,219 @@ document.addEventListener('DOMContentLoaded', initAllFeatures);
 /* =========================================================
    统一发送文字 / 文件 / 粘贴图
    ========================================================= */
+// main.js
+
+/**
+ * 发送聊天消息（文本、选择的文件、粘贴的图片）。
+ * 所有类型的消息（包括纯文本）都将通过 HTTP POST 请求发送到 /chat_with_file 接口。
+ */
 async function sendChatMessage() {
-  const chatInputEl    = document.getElementById('chat-chat-input');
-  const chatHistoryEl  = document.getElementById('chat-chat-history');
-  const previewWrap    = document.getElementById('chat-upload-preview');
-  const useStreaming = document.getElementById('streaming-toggle-checkbox').checked;
+    // --- 0. 获取必要的DOM元素和状态 ---
+    const chatInputEl = document.getElementById('chat-chat-input');
+    const chatHistoryEl = document.getElementById('chat-chat-history');
+    const previewWrapEl = document.getElementById('chat-upload-preview');
+    const useStreaming = document.getElementById('streaming-toggle-checkbox').checked; // 后端会决定是否流式
 
-  /* ---------- 基础校验 ---------- */
-  if (!socket?.connected) {
-    appendSystemError('错误：无法连接到服务器，请检查网络连接。');
-    return;
-  }
-  if (!chatInputEl || !chatHistoryEl) return;
+    // --- 1. 基础校验 ---
+    if (!chatInputEl || !chatHistoryEl || !previewWrapEl) {
+        console.error("sendChatMessage: Critical UI elements (input, history, or preview) not found.");
+        // 也可以考虑在此处调用 appendSystemMessage，但如果 chatHistoryEl 都没有，就只能 console.error
+        return;
+    }
+    if (!selectedModel.provider || !selectedModel.model_id) {
+        appendSystemMessage('请先从顶部选择一个 AI 模型。', chatHistoryEl);
+        return;
+    }
 
-  const txt = chatInputEl.value.trim();
-  const fileToSend   = uploadedFile        || null;          // 由 file input 选中
-  const imageBase64  = window.pastedImageBase64 || null;     // 由粘贴逻辑填充
+    const inputText = chatInputEl.value.trim();
+    const filesSelected = uploadedFiles.length > 0 ? [...uploadedFiles] : [];
+    const imagesPastedBase64 = window.pastedImageBase64Array && window.pastedImageBase64Array.length > 0 ? [...window.pastedImageBase64Array] : [];
 
-  if (!txt && !fileToSend && !imageBase64) return;           // 空发送，忽略
 
-  if (!selectedModel.provider || !selectedModel.model_id) {
-    appendSystemError('请先从顶部选择一个 AI 模型。');
-    return;
-  }
+    // ✨ 添加详细的日志进行调试 ✨
+    console.log(`[DEBUG] sendChatMessage values:`);
+    console.log(`  inputText: "${inputText}" (type: ${typeof inputText}, length: ${inputText.length})`);
+    console.log(`  !inputText: ${!inputText}`);
+    console.log(`  filesSelected.length: ${filesSelected.length}`);
+    console.log(`  imagesPastedBase64.length: ${imagesPastedBase64.length}`);
+    const conditionResult = !inputText && filesSelected.length === 0 && imagesPastedBase64.length === 0;
+    console.log(`  Condition (!inputText && filesSelected.length === 0 && imagesPastedBase64.length === 0) is: ${conditionResult}`);
 
-  /* ---------- 找 / 建 会话 ---------- */
-  let sess = chatSessions.find(s => s.id === currentChatSessionId);
-  if (!sess) {
-    sess = {
-      id:   Date.now(),
-      title: (txt || (fileToSend ? fileToSend.name : '包含图片的对话')).slice(0, 30),
-      history: []
-    };
-    chatSessions.unshift(sess);
-    addChatHistoryItem(sess);
-    currentChatSessionId = sess.id;
-    saveCurrentChatSessionId?.();
-  }
+    if (conditionResult) { // 使用计算好的条件结果
+        debugLog("sendChatMessage: No content (text, files, or pasted images) to send.");
+        return; // 没有内容可发送
+    }
+    // if (!inputText && filesSelected.length === 0 && imagesPastedBase64.length === 0) {
+    //     debugLog("sendChatMessage: No content (text, files, or pasted images) to send.");
+    //     return; // 没有内容可发送
+    // }
 
-  /* ---------- Push "user" 历史 ---------- */
-  let historyText = txt;
-  if (!historyText) {
-    historyText = fileToSend
-      ? `[用户上传了文件: ${fileToSend.name}]`
-      : '[用户发送了一张图片]';
-  }
-  sess.history.push({ role:'user', parts:[{ text: historyText }] });
+    // --- 2. 获取或创建当前聊天会话 ---
+    let currentSession = chatSessions.find(s => s.id === currentChatSessionId);
+    if (!currentSession) {
+        const newTitleBase = inputText ||
+                           (filesSelected.length > 0 ? filesSelected[0].name : '') ||
+                           (imagesPastedBase64.length > 0 ? `粘贴的图片 (${imagesPastedBase64.length}张)` : '新对话');
+        currentSession = {
+            id: generateUUID(),
+            title: newTitleBase.substring(0, 35) + (newTitleBase.length > 35 ? '...' : ''),
+            history: [],
+            createdAt: Date.now()
+        };
+        chatSessions.unshift(currentSession);
+        if (typeof addChatHistoryItem === "function") addChatHistoryItem(currentSession);
+        currentChatSessionId = currentSession.id;
+        if (typeof saveCurrentChatSessionId === "function") saveCurrentChatSessionId();
+        if (typeof setActiveChatSessionUI === "function") setActiveChatSessionUI(currentChatSessionId);
+    }
 
-  /* ---------- UI: 用户消息气泡 ---------- */
-  const uDiv = document.createElement('div');
-  uDiv.className = 'user-message';
-  uDiv.innerHTML = `<strong>您: </strong>`;
-  const content = document.createElement('div');
-  content.className = 'message-content';
-  if (txt)  content.append(txt);
-  if (imageBase64)  content.innerHTML += '<br><i class="fas fa-image"></i> [已粘贴图片]';
-  if (fileToSend)   content.innerHTML += `<br><i class="fas fa-paperclip"></i> ${escapeHtml(fileToSend.name)}`;
-  uDiv.appendChild(content);
-  chatHistoryEl.appendChild(uDiv);
+    // --- 3. 构建用户消息内容（用于历史记录和UI气泡） ---
+    const messagePartsForDisplay = []; // 用于构建用户气泡的 parts
+    if (inputText) {
+        messagePartsForDisplay.push({ type: 'text', content: inputText });
+    }
+    if (filesSelected.length > 0) {
+        messagePartsForDisplay.push({ type: 'files', files: filesSelected.map(f => ({ name: f.name, size: f.size })) });
+    }
+    if (imagesPastedBase64.length > 0) {
+        messagePartsForDisplay.push({ type: 'pasted_images', count: imagesPastedBase64.length, base64Array: imagesPastedBase64 });
+    }
+    
 
-  /* ---------- AI thinking 占位 ---------- */
-  const reqId = generateUUID();
-  const think = document.createElement('div');
-  think.className = 'ai-message ai-thinking';
-  think.dataset.requestId = reqId;
-  think.innerHTML = `<i class="fas fa-spinner fa-spin"></i> AI (${selectedModel.provider}/${selectedModel.model_id}) 正在思考...`;
-  chatHistoryEl.appendChild(think);
-  scrollToChatBottom(chatHistoryEl);
+    // 生成用于存储到 session.history 的文本描述 (更简洁，主要用于AI上下文)
+    let historyLogText = inputText;
+    if (filesSelected.length > 0) {
+        historyLogText += (historyLogText ? "\n" : "") + `[用户上传了 ${filesSelected.length} 个文件: ${filesSelected.map(f=>f.name).join(', ')}]`;
+    }
+    if (imagesPastedBase64.length > 0) {
+        historyLogText += (historyLogText ? "\n" : "") + `[用户粘贴了 ${imagesPastedBase64.length} 张图片]`;
+    }
+    if (!historyLogText && (filesSelected.length > 0 || imagesPastedBase64.length > 0)) {
+        historyLogText = "[用户发送了媒体内容]"; // 如果只有文件/图片没有文本
+    }
 
-  /* ---------- 历史里加 AI 占位 ---------- */
-  sess.history.push({ role:'model', parts:[{text:''}], temp_id:reqId,
-                      provider:selectedModel.provider, model_id:selectedModel.model_id });
 
-  /* ---------- 构造历史副本（不含 AI 占位） ---------- */
-  const historyToSend = sess.history.slice(0, -1);
+    // 生成用于显示在用户聊天气泡中的HTML内容
+    let userBubbleHTML = '';
+    messagePartsForDisplay.forEach((part, index) => {
+        let partHTML = '';
+        if (part.type === 'text') {
+            partHTML = escapeHtml(part.content);
+        } else if (part.type === 'files') {
+            partHTML = `<i class="fas fa-paperclip"></i> ${part.files.length} 个文件: ${part.files.map(f => escapeHtml(f.name)).join(', ')}`;
+        } else if (part.type === 'pasted_images') {
+            let pastedImagesPreviewHTMLInBubble = '';
+            part.base64Array.forEach((base64, idx) => {
+                pastedImagesPreviewHTMLInBubble += `<img src="data:image/png;base64,${base64}" alt="pasted image ${idx+1}" style="max-width:50px; max-height:50px; margin:2px; border:1px solid var(--bs-border-color); border-radius:3px; display:inline-block;">`;
+            });
+            partHTML = `<div class="pasted-images-preview-in-bubble my-1">${pastedImagesPreviewHTMLInBubble}</div> (${part.count} 张粘贴的图片)`;
+        }
 
-  /* ---------- 发送 ---------- */
-  if (fileToSend) {
-    /* ======= 文件上传: /chat_with_file ======= */
-    const fd = new FormData();
-    fd.append('prompt', txt);
-    fd.append('file', fileToSend, fileToSend.name);
-    fd.append('history', JSON.stringify(historyToSend));
-    fd.append('session_id', sess.id);
-    fd.append('request_id', reqId);
-    fd.append('provider', selectedModel.provider);
-    fd.append('model_id', selectedModel.model_id);
-
-    fetch('/chat_with_file', { method:'POST',
-         headers:{ ...(TOKEN && {Authorization:`Bearer ${TOKEN}`}) }, body:fd })
-      .then(r => r.ok ? r.json() : Promise.reject(r))
-      .catch(e => showRequestError(e, reqId));
-  } else {
-    /* ======= 文字/粘贴图: Socket ======= */
-    socket.emit('chat_message', {
-      request_id : reqId,
-      prompt     : txt,
-      history    : historyToSend,
-      use_streaming : useStreaming,
-      session_id : sess.id,
-      provider   : selectedModel.provider,
-      model_id   : selectedModel.model_id,
-      image_data : imageBase64                     // null 则后端忽略
+        if (userBubbleHTML && partHTML) { // 如果不是第一部分且当前部分有内容
+            userBubbleHTML += (part.type === 'text' && messagePartsForDisplay[index-1]?.type === 'text') ? (' ' + partHTML) : ('<br>' + partHTML);
+        } else {
+            userBubbleHTML += partHTML;
+        }
     });
-  }
 
-  /* ---------- 清理输入区 ---------- */
-  chatInputEl.value = '';
-  previewWrap.innerHTML = '';
-  uploadedFile = null;
-  window.pastedImageBase64 = null;
+    if (!userBubbleHTML.trim()) { // 避免发送完全是空内容的气泡
+         if (filesSelected.length > 0 || imagesPastedBase64.length > 0) {
+            userBubbleHTML = "(已发送媒体内容)";
+         } else {
+            debugLog("sendChatMessage: User bubble content is empty. Not sending.");
+            return;
+         }
+    }
 
-  saveChatSessionsToStorage?.();
-}
 
-/* ======== 辅助 ======== */
-function appendSystemError(msg){
-  const err = document.createElement('div');
-  err.className = 'system-message error-text';
-  err.textContent = msg;
-  document.getElementById('chat-chat-history')
-           .appendChild(err);
-  scrollToChatBottom(document.getElementById('chat-chat-history'));
-}
-function showRequestError(e, reqId){
-  console.error('[Chat] file upload error:', e);
-  const think = document.querySelector(`.ai-thinking[data-request-id="${reqId}"]`);
-  think?.remove();
-  appendSystemError('文件上传请求失败');
+    // --- 4. 更新UI：添加用户消息气泡和会话历史 ---
+    if (historyLogText) { // 只有当 historyLogText 不为空时才添加到历史记录
+        currentSession.history.push({ role: 'user', parts: [{ text: historyLogText }] });
+    }
+
+    const userMessageDiv = document.createElement('div');
+    userMessageDiv.className = 'user-message';
+    userMessageDiv.innerHTML = `<strong>您: </strong><div class="message-content">${userBubbleHTML}</div>`;
+    chatHistoryEl.appendChild(userMessageDiv);
+
+    if (chatHistoryEl.firstElementChild && chatHistoryEl.firstElementChild.classList.contains('system-message') && chatHistoryEl.firstElementChild.textContent.includes('选择左侧记录或开始新对话')) {
+        chatHistoryEl.firstElementChild.remove();
+    }
+
+    // --- 5. 准备AI请求ID和“思考中”UI ---
+    const requestId = generateUUID();
+    const thinkingIndicatorDiv = document.createElement('div');
+    thinkingIndicatorDiv.className = 'ai-message ai-thinking';
+    thinkingIndicatorDiv.dataset.requestId = requestId;
+    thinkingIndicatorDiv.innerHTML = `<i class="fas fa-spinner fa-spin"></i> AI (${selectedModel.provider}/${selectedModel.model_id}) 正在思考...`;
+    chatHistoryEl.appendChild(thinkingIndicatorDiv);
+    if (typeof scrollToChatBottom === "function") scrollToChatBottom(chatHistoryEl);
+
+    currentSession.history.push({
+        role: 'model', parts: [{ text: '' }], temp_id: requestId,
+        provider: selectedModel.provider, model_id: selectedModel.model_id
+    });
+    const historyForAI = currentSession.history.slice(0, -1);
+
+    // --- 6. 统一通过 HTTP FormData 发送所有内容到 /chat_with_file ---
+    const formData = new FormData();
+    formData.append('prompt', inputText); // 用户输入的原始文本提示
+    formData.append('history', JSON.stringify(historyForAI));
+    formData.append('session_id', currentSession.id); // 后端 /chat_with_file 可能会用到
+    formData.append('request_id', requestId);
+    formData.append('provider', selectedModel.provider);
+    formData.append('model_id', selectedModel.model_id);
+
+    // 添加选择的文件 (File 对象)
+    filesSelected.forEach(file => {
+        formData.append('files', file, file.name); // 后端用 request.files.getlist("files")
+    });
+
+    // 添加粘贴的图片的Base64数据数组 (作为JSON字符串)
+    if (imagesPastedBase64.length > 0) {
+        formData.append('pasted_images_base64_json_array', JSON.stringify(imagesPastedBase64));
+    }
+    formData.append('use_streaming', useStreaming);
+    debugLog(`Sending unified request to /chat_with_file. Files: ${filesSelected.length}, Pasted Images: ${imagesPastedBase64.length}, Prompt: "${inputText}"`);
+
+    fetch('/chat_with_file', {
+        method: 'POST',
+        headers: { ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` }) },
+        body: formData
+    })
+    .then(response => {
+        if (!response.ok) {
+            return response.json().catch(() => ({
+                error: `HTTP Error: ${response.status} ${response.statusText}`,
+                details: `Response body was not valid JSON or empty.`
+            })).then(errData => Promise.reject(errData));
+        }
+        return response.json();
+    })
+    .then(data => {
+        debugLog('/chat_with_file request acknowledged:', data);
+        // AI的回复将通过Socket.IO事件 (chat_stream_chunk, chat_stream_end) 返回并更新 thinkingIndicatorDiv
+        // 这些事件会使用 requestId 来匹配和更新正确的 thinkingIndicatorDiv
+    })
+    .catch(error => {
+        console.error('Error sending unified request via /chat_with_file:', error);
+        if (typeof removeThinkingIndicator === "function") removeThinkingIndicator(chatHistoryEl, thinkingIndicatorDiv);
+        else if (thinkingIndicatorDiv.parentNode) thinkingIndicatorDiv.parentNode.removeChild(thinkingIndicatorDiv);
+
+        // 从会话历史中移除对应的AI占位符，因为它不会有回复了
+        const modelPlaceholderIdx = currentSession.history.findIndex(m => m.temp_id === requestId);
+        if (modelPlaceholderIdx > -1) currentSession.history.splice(modelPlaceholderIdx, 1);
+
+        appendSystemMessage(`请求发送失败: ${error.error || error.message || JSON.stringify(error) || '未知错误'}`, chatHistoryEl);
+    });
+
+    // --- 7. 清理前端状态 ---
+    chatInputEl.value = '';
+    if (previewWrapEl) previewWrapEl.innerHTML = '';
+    uploadedFiles = [];
+    if (window.pastedImageBase64Array) window.pastedImageBase64Array = [];
+    if (window.pastedImageBase64) window.pastedImageBase64 = null;
+
+    if (typeof saveChatSessionsToStorage === "function") saveChatSessionsToStorage();
+    if (typeof bumpActiveChatSessionToTop === "function") bumpActiveChatSessionToTop();
 }
