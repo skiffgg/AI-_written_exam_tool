@@ -1,13 +1,12 @@
-/**
- * main.js
- *
+/** 
+ * main.js 
+ * 
  * Frontend JavaScript logic for the AI Assistant Dashboard.
  * Includes Markdown and LaTeX rendering for chat messages.
  */
 
 // --- Global Variables & State ---
-
-import renderMathInElement from 'katex/contrib/auto-render'
+import renderMathInElement from 'katex/contrib/auto-render';
 import 'katex/dist/katex.min.css';
 import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js';
@@ -22,10 +21,10 @@ let isDragging = false;
 let dragStartX, dragStartY;
 let dragType = '';
 let currentImage = null; // URL of image in overlay
-let socket = null;
+let socket = null; // Socket.IO 客户端实例
 let latexConversionHappened = false;
 let uploadedFiles = []; // File staged for chat upload
-let pastedImageBase64Array = [];//用于存储粘贴的多张图片的Base64编码数组
+let pastedImageBase64Array = []; //用于存储粘贴的多张图片的Base64编码数组
 let mediaRecorder; // For voice recording
 let audioChunks = []; // Store audio data chunks
 let chatSessions = []; // Stores all chat session objects {id, title, history}
@@ -189,7 +188,7 @@ function preprocessTextForRendering(text) {
     });
 
     // Fix apostrophe characters
-    processedText = processedText.replace(/’/g, "'");
+    processedText = processedText.replace(/'/g, "'");
 
     if (latexConversionHappened) {
         console.log("[Preprocess] LaTeX separators converted.");
@@ -210,7 +209,7 @@ function initMarkdownRenderer() {
             langPrefix: 'language-',
             linkify: true,
             typographer: false,
-            quotes: '“”‘’',
+            quotes: '""',
             highlight: function (str, lang) {
                 if (lang && hljs.getLanguage(lang)) {
                     try {
@@ -317,7 +316,7 @@ function processAIMessage(messageElement, messageText, sourceEvent = "unknown") 
     if (sourceEvent === "chat_stream_chunk" && streamingSpan) {
         contentDiv = streamingSpan; // 后续文本将追加到这里
     } else {
-        // 对于非流式块、流结束，或者 streamingSpan 不存在的情况
+        // 对于非流式或流结束，或者 streamingSpan 不存在的情况
         if (streamingSpan) streamingSpan.remove(); // 移除临时的流式 span
 
         contentDiv = messageElement.querySelector('.message-content');
@@ -425,7 +424,7 @@ function initVoiceFeature() {
     }
 
 
-    // “开始录音”按钮的事件监听器
+    // "开始录音"按钮的事件监听器
     startRecordingBtn.addEventListener('click', async () => {
         audioChunks = []; // 清空之前的音频片段
           document
@@ -495,7 +494,7 @@ function initVoiceFeature() {
                 audioChunks = []; // 清空，为下次录音准备
 
                 // 按钮状态的最终控制权在 sendVoiceToServer 成功或失败，以及Socket.IO事件回调中
-                // 这里可以暂时保持“停止录音”为禁用，因为处理已经开始
+                // 这里可以暂时保持"停止录音"为禁用，因为处理已经开始
                 // startRecordingBtn.disabled = true; // 保持禁用，直到处理完成或失败
                 // stopRecordingBtn.disabled = true;  // 已经停止，禁用它
             };
@@ -522,7 +521,7 @@ function initVoiceFeature() {
         }
     });
 
-    // “停止录音”按钮的事件监听器
+    // "停止录音"按钮的事件监听器
     stopRecordingBtn.addEventListener('click', () => {
         if (mediaRecorder && mediaRecorder.state === 'recording') {
             console.log("[VOICE] Stop recording button clicked.");
@@ -1079,7 +1078,7 @@ function initAiChatHandlers() {
     //     const base64 = reader.result.split(',')[1];
     //     const reqId  = generateUUID();
 
-    //     // 在聊天窗口插入“用户图片”占位
+    //     // 在聊天窗口插入"用户图片"占位
     //     const msgDiv = document.createElement('div');
     //     msgDiv.className = 'user-message';
     //     msgDiv.dataset.requestId = reqId;
@@ -1281,7 +1280,7 @@ function handleFileUpload(e) {
     }
 
     // **重要：为了让下一次选择相同文件也能触发 change 事件，需要在处理完后清空原生文件输入框的值。**
-    // 否则，如果用户选择了一批文件，然后再次点击“+”号并选择完全相同的一批文件，change 事件可能不会触发。
+    // 否则，如果用户选择了一批文件，然后再次点击"+"号并选择完全相同的一批文件，change 事件可能不会触发。
     fileInput.value = ''; // 放在这里，确保每次选择操作后都清空
     console.log("Final uploadedFiles after this selection:", uploadedFiles.map(f => f.name));
 }
@@ -1517,7 +1516,7 @@ function initBaseButtonHandlers() {
   document.getElementById('cancel-selection')  ?.addEventListener('click', hideImageOverlay);
 
   /* ========= （已删除）粘贴图片立即发送 =========
-     该逻辑已经移动到 “粘贴/选择文件 → 仅预览，点发送再发” 的统一实现中。
+     该逻辑已经移动到 "粘贴/选择文件 → 仅预览，点发送再发" 的统一实现中。
      若仍需要，请确保只保留一份逻辑，避免重复发送。 */
 }
 
@@ -1578,778 +1577,8 @@ function initBaseButtonHandlers() {
   // function stageImage(file) { ... } // 可以安全删除此函数
 })();
 
-
-
-
-
-function updateSelectionBox() {
-  const selBox   = document.getElementById('selection-box');
-  const cropInfo = document.getElementById('crop-info');
-  const imgEl    = document.getElementById('overlay-image');
-
-  if (!selBox || !cropInfo || !imgEl || !imgEl.width || !imgEl.naturalWidth) return;
-
-  // 1) 边界 & 最小尺寸校正
-  selection.x      = Math.max(0, Math.min(selection.x, imgEl.width));
-  selection.y      = Math.max(0, Math.min(selection.y, imgEl.height));
-  selection.width  = Math.max(10, Math.min(selection.width,  imgEl.width  - selection.x));
-  selection.height = Math.max(10, Math.min(selection.height, imgEl.height - selection.y));
-
-  // 2) 更新选框 CSS
-  Object.assign(selBox.style, {
-    left  : `${selection.x}px`,
-    top   : `${selection.y}px`,
-    width : `${selection.width}px`,
-    height: `${selection.height}px`
-  });
-
-  // 3) 显示原图中的坐标/尺寸
-  const scaleX = imgEl.naturalWidth  / imgEl.width;
-  const scaleY = imgEl.naturalHeight / imgEl.height;
-  cropInfo.textContent =
-    `选择(原图): ${Math.round(selection.x * scaleX)}, ${Math.round(selection.y * scaleY)}, ` +
-    `${Math.round(selection.width * scaleX)} × ${Math.round(selection.height * scaleY)}`;
-}
-
-
-
-function saveCurrentChatSessionId() {
-    if (currentChatSessionId) { 
-        localStorage.setItem('currentChatSessionId', currentChatSessionId); 
-    } else { 
-        localStorage.removeItem('currentChatSessionId'); 
-    }
-}
-
-// --- initAllFeatures (Main entry point for UI initialization) ---
-function initAllFeatures() {
-  console.log("--- Initializing All Features ---");
-  loadHistoriesFromStorage();      // ★★ 加在最顶部
-    /* ② 渲染已有历史到左栏 */
-  ssHistory.forEach(addHistoryItem);            // ← 截图条目
-  voiceHistory.forEach(addVoiceHistoryItem);    // ← 语音条目 (若有)
-
-    const fileInput = document.getElementById('chat-file-upload');
-    const attachBtn = document.getElementById('chat-attach-file-btn');
-
-
-    attachBtn.addEventListener('click', function(e) {
-    // 只处理用户真实点击
-    if (!e.isTrusted) return;
-    // fileInput.click();
-    });
-
-
-    // 仍然监听 change 事件进行预览
-    fileInput.addEventListener('change', handleFileUpload);
-
-  // Load token from meta tag
-  const tokenMeta = document.querySelector('meta[name="token"]');
-  if (tokenMeta?.content && tokenMeta.content !== "{{ token }}") {
-    TOKEN = tokenMeta.content;
-    console.log("Token loaded:", TOKEN);
-  } else {
-    console.warn('Token meta tag missing or placeholder.');
-  }
-
-  // Initialize Markdown renderer and theme selector if functions are available
-  if (typeof initMarkdownRenderer === 'function') initMarkdownRenderer();
-  if (typeof initThemeSelector === 'function') initThemeSelector();
-
-  // Initialize main navigation dropdown
-  initMainNavigation(); // Initialize NEW dropdown navigation first
-
-  // Fetch and populate models
-  if (typeof fetchAndPopulateModels === 'function') {
-    fetchAndPopulateModels();
-  } else {
-    console.error("CRITICAL: fetchAndPopulateModels not defined!");
-  }
-
-  // Initialize top controls for left panel
-  initLeftPanelTopControls(); // NEW: Initialize top controls for left panels
-  initBaseButtonHandlers();
-  initVoiceFeature();
-  initScreenshotStreamToggle();
-
-  // Render LaTeX in message content and analysis sections
-  if (typeof renderLatexInElement === 'function') {
-    setTimeout(() => { 
-      document.querySelectorAll('.message-content, .ai-analysis').forEach(element => {
-        try { 
-          renderLatexInElement(element); 
-        } catch (e) { 
-          console.error("KaTeX Error on initial load:", e, element); 
-        }
-      });
-    }, 300);
-  }
-
-  // Initialize specific feature handlers
-  if (typeof initScreenshotAnalysisHandlers === 'function') initScreenshotAnalysisHandlers();
-  if (typeof initAiChatHandlers === 'function') {
-    initAiChatHandlers(); // This should also call initChatInputBarButtons
-    //initVoiceFeature();
-  }
-  if (typeof initVoiceAnswerHandlers === 'function') initVoiceAnswerHandlers();
-
-  // Initialize Socket.IO connection
-  if (typeof initSocketIO === 'function') {
-    initSocketIO();
-  } else {
-    console.error("CRITICAL: initSocketIO not defined!");
-  }
-
-  // Load chat sessions from storage
-  if (typeof loadChatSessionsFromStorage === 'function') {
-    loadChatSessionsFromStorage();
-  } else {
-    console.warn("loadChatSessionsFromStorage not defined.");
-  }
-
-  console.log("--- Application initialization complete ---");
-}
-
-// ------------------------------------------------------------------
-//  renderChatHistory — 唯一正式实现
-//  依赖工具: escapeHtml, processAIMessage, scrollToChatBottom
-// ------------------------------------------------------------------
-function renderChatHistory(historyArray) {
-    const chatHistoryEl = document.getElementById('chat-chat-history');
-    if (!chatHistoryEl) return;
-
-    chatHistoryEl.innerHTML = '';
-    if (!historyArray || !historyArray.length) {
-        chatHistoryEl.innerHTML =
-            '<div class="system-message">对话为空...</div>';
-        return;
-    }
-
-    historyArray.forEach(turn => {
-        if (!turn || !turn.role || !turn.parts || !turn.parts[0]) return;
-        const role = turn.role;
-        const text = (turn.parts[0].text) || '';
-        const msgDiv = document.createElement('div');
-
-        if (role === 'user') {
-            msgDiv.className = 'user-message';
-            const strong = document.createElement('strong');
-            strong.textContent = '您: ';
-            msgDiv.appendChild(strong);
-
-            const content = document.createElement('div');
-            content.className = 'message-content';
-            content.textContent = text;
-
-            // 若文本里携带「用户上传了文件」占位，替换为附件样式
-            const fileMatch = text.match(/\[用户上传了文件: (.*?)\]/);
-            if (fileMatch && fileMatch[1]) {
-                content.textContent = text.replace(fileMatch[0], '').trim();
-                const fileInfo = document.createElement('div');
-                fileInfo.className = 'attached-file';
-                fileInfo.innerHTML =
-                    `<i class="fas fa-paperclip"></i> (文件: ${escapeHtml(fileMatch[1])})`;
-                if (content.textContent) content.appendChild(document.createElement('br'));
-                content.appendChild(fileInfo);
-            }
-            msgDiv.appendChild(content);
-
-        } else if (role === 'model') {
-            msgDiv.className = 'ai-message';
-            // 交给 processAIMessage 渲染 Markdown / LaTeX
-            processAIMessage(msgDiv, text, 'history_load');
-
-        } else { // system / function 之类
-            msgDiv.className = 'system-message';
-            const strong = document.createElement('strong');
-            strong.textContent = `${role}: `;
-            msgDiv.appendChild(strong);
-
-            const content = document.createElement('div');
-            content.className = 'message-content';
-            content.textContent = text;
-            msgDiv.appendChild(content);
-        }
-
-        chatHistoryEl.appendChild(msgDiv);
-    });
-
-    scrollToChatBottom(chatHistoryEl);
-}
-
-// main.js (可以放在其他辅助函数附近)
-
-/**
- * 在指定的聊天历史元素中追加一条系统消息或错误提示。
- * @param {string} message 要显示的消息文本。
- * @param {HTMLElement} chatHistoryElRef 可选，聊天历史的DOM元素。如果未提供，则尝试获取 #chat-chat-history。
- * @param {string} messageType 可选，消息类型，用于CSS样式，例如 'error', 'info', 'success'。默认为 'system' 或 'error'。
- */
-function appendSystemMessage(message, chatHistoryElRef, messageType = 'system') {
-    const chatHistoryElement = chatHistoryElRef || document.getElementById('chat-chat-history');
-    if (!chatHistoryElement) {
-        console.error("appendSystemMessage: Chat history element not found.");
-        return;
-    }
-
-    const messageDiv = document.createElement('div');
-    // 根据 messageType 设置不同的CSS类，以便自定义样式
-    if (messageType === 'error') {
-        messageDiv.className = 'system-message error-text p-2 my-1 text-danger border border-danger rounded bg-light-danger'; // 示例CSS类
-    } else if (messageType === 'info') {
-        messageDiv.className = 'system-message info-text p-2 my-1 text-info border border-info rounded bg-light-info';
-    } else { // 'system' or default
-        messageDiv.className = 'system-message p-2 my-1 text-muted'; // 默认的系统消息样式
-    }
-    messageDiv.textContent = message;
-
-    chatHistoryElement.appendChild(messageDiv);
-    if (typeof scrollToChatBottom === "function") { // 确保 scrollToChatBottom 已定义
-        scrollToChatBottom(chatHistoryElement);
-    }
-}
-
-// 您可能已经在 style.css 中有 .system-message 和 .error-text 的样式
-// 如果没有，可以添加一些基础样式，例如：
-/*
-In style.css:
-.system-message {
-    font-size: 0.85em;
-    text-align: center;
-    margin: 0.5rem auto;
-    padding: 0.25rem 0.5rem;
-    max-width: 80%;
-    color: var(--system-message-text-color, #6c757d);
-}
-.error-text {
-    color: var(--error-message-text-color, #842029) !important;
-    background-color: var(--error-message-bg, #f8d7da);
-    border: 1px solid var(--error-message-border-color, #f5c2c7);
-    border-radius: var(--bs-border-radius-sm, 0.2rem);
-}
-.info-text {
-    color: #0c5460 !important;
-    background-color: #d1ecf1;
-    border: 1px solid #bee5eb;
-    border-radius: var(--bs-border-radius-sm, 0.2rem);
-}
-*/
-
-// main.js (可以放在其他与聊天会话UI相关的函数附近)
-
-/**
- * 在左侧的聊天会话列表中，高亮显示指定的会话项，并取消其他项的高亮。
- * @param {string | number | null} sessionId 要激活的会话的ID。如果为 null，则取消所有高亮。
- */
-function setActiveChatSessionUI(sessionId) {
-    const sessionListEl = document.getElementById('chat-session-list');
-    if (!sessionListEl) {
-        // console.warn("setActiveChatSessionUI: Session list element (#chat-session-list) not found.");
-        return;
-    }
-
-    // 移除所有现有会话项的 'active-session' 类
-    const currentActiveItems = sessionListEl.querySelectorAll('.history-item.active-session');
-    currentActiveItems.forEach(item => {
-        item.classList.remove('active-session');
-    });
-
-    // 如果提供了有效的 sessionId，则给对应的会话项添加 'active-session' 类
-    if (sessionId !== null && sessionId !== undefined) {
-        // 构建选择器时要注意 sessionId 的类型，如果它是数字，直接用模板字符串可能没问题，
-        // 但如果包含特殊字符或纯数字，确保CSS选择器有效。
-        // 使用CSS.escape() 可以更安全，但需要浏览器支持。
-        // let escapedSessionId;
-        // try {
-        //     escapedSessionId = CSS.escape(String(sessionId));
-        // } catch (e) {
-        //     escapedSessionId = String(sessionId).replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1'); // 简单转义
-        // }
-        // const newActiveItem = sessionListEl.querySelector(`.history-item[data-session-id="${escapedSessionId}"]`);
-
-        // 通常情况下，session ID 是UUID字符串或时间戳数字，可以直接用
-        const newActiveItem = sessionListEl.querySelector(`.history-item[data-session-id="${String(sessionId)}"]`);
-
-        if (newActiveItem) {
-            newActiveItem.classList.add('active-session');
-            // 可选：将激活的项滚动到视图中 (如果列表是可滚动的)
-            // newActiveItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        } else {
-            // console.warn(`setActiveChatSessionUI: No session item found with ID: ${sessionId}`);
-        }
-    }
-}
-
-// 确保您在 style.css 中有 .active-session 类的样式，例如：
-/*
-In style.css:
-.history-item.active-session {
-    background-color: var(--history-item-active-bg, #e0e7ff) !important;
-    border-left-color: var(--history-item-active-border-color, var(--primary-color, #0d6efd)) !important;
-    font-weight: bold;
-}
-.history-item.active-session .history-item-content-wrapper > div:first-child {
-    color: var(--panel-title-text-color, var(--primary-color, #0d6efd));
-}
-*/
-
-
-
-
-// 修改后的 addChatHistoryItem (AI 对话历史)
-/* =========================================================
-   addChatHistoryItem — 在左侧会话栏插入 / 更新一条 <li>
-   ========================================================= */
-function addChatHistoryItem(session) {
-
-  const listEl = document.getElementById('chat-session-list');
-  if (!listEl || !session || !session.id) {
-    console.warn('[ChatHistory] list element or session missing', session);
-    return;
-  }
-
-  /* ---------- 1. 若已存在同 id 的 <li>，先移除 ---------- */
-  listEl.querySelector(`li[data-session-id="${session.id}"]`)?.remove();
-
-  /* ---------- 2. 创建新的 <li> ---------- */
-  const li = document.createElement('li');
-  li.className = 'history-item chat-history-item';
-  li.dataset.sessionId = String(session.id);
-
-  /* ---- 内容包裹 ---- */
-  const wrapper = document.createElement('div');
-  wrapper.className = 'history-item-content-wrapper';
-
-  /* 标题 + 时间 */
-  const title   = session.title?.trim() || '无标题对话';
-  const ts      = session.created_at
-                    ? new Date(session.created_at)
-                    : (Number(session.id) ? new Date(Number(session.id)) : new Date());
-  const tsText  = ts.toLocaleString([], { dateStyle:'short', timeStyle:'short', hour12:false });
-
-  const titleDiv = document.createElement('div');
-  Object.assign(titleDiv.style, {
-    fontWeight:'500', whiteSpace:'nowrap',
-    overflow:'hidden', textOverflow:'ellipsis'
-  });
-  titleDiv.title = title;
-  titleDiv.innerHTML = `<i class="fas fa-comment"></i> ${escapeHtml(title)}`;
-
-  const timeDiv  = document.createElement('div');
-  timeDiv.style.cssText = 'font-size:.75em;color:#666;';
-  timeDiv.textContent   = tsText;
-
-  wrapper.appendChild(titleDiv);
-  wrapper.appendChild(timeDiv);
-
-  /* ---- 删除按钮 ---- */
-  const actions = document.createElement('div');
-  actions.className = 'history-item-actions';
-
-  actions.appendChild(
-    createDeleteButton(() => {
-      if (!confirm(`确定要删除对话 "${title}"?`)) return;
-
-      /* 1. 删数组 + 保存 */
-      chatSessions = chatSessions.filter(s => s.id !== session.id);
-      saveChatSessionsToStorage?.();
-
-      /* 2. 删 DOM */
-      li.remove();
-
-      /* 3. 若正在查看此会话，则清右侧窗口 */
-      if (currentChatSessionId === session.id) {
-        clearCurrentChatDisplay?.();
-      }
-    })
-  );
-
-  /* ---- 组装 li ---- */
-  li.appendChild(wrapper);
-  li.appendChild(actions);
-
-  /* ---- 点击 li → 激活会话 ---- */
-  li.addEventListener('click', (e) => {
-    if (e.target.closest('.history-item-actions')) return; // 点到了删除
-    const sid = session.id;
-
-    /* 设置激活 */
-    currentChatSessionId = sid;
-    renderChatHistory?.(session.history || []);
-    listEl.querySelectorAll('.history-item.active-session')
-          .forEach(el => el.classList.remove('active-session'));
-    li.classList.add('active-session');
-    saveCurrentChatSessionId?.();
-
-    document.getElementById('chat-chat-input')?.focus();
-  });
-
-  /* ---------- 3. 插入到列表最前 ---------- */
-  listEl.insertBefore(li, listEl.firstChild);
-}
-
-function bumpActiveChatSessionToTop() {
-  const listEl = document.getElementById('chat-session-list');
-  const activeLi = listEl.querySelector(`li[data-session-id="${currentChatSessionId}"]`);
-  if (activeLi) listEl.insertBefore(activeLi, listEl.firstChild);
-}
-
-
-  // —— 确保历史条并返回它 —— 
-function ensureHistoryItem(url, analysis='') {
-  const list = document.getElementById('ss-history-list');
-  let li = list.querySelector(`li[data-url="${url}"]`);
-  if (!li) {
-    li = document.createElement('li');
-    li.dataset.url = url;
-    li.addEventListener('click', () => selectHistoryItem(li, { image_url: url, analysis }));
-    const thumb = document.createElement('img');
-    thumb.src = url; thumb.alt = '缩略';
-    li.appendChild(thumb);
-    list.prepend(li);
-  }
-  li.dataset.analysis = analysis;
-  return li;
-}
-
-// —— 切面板到“截图分析” —— 
-function switchToScreenshotPanel() {
-  // 导航按钮高亮
-  document.querySelectorAll('.nav-dropdown-item.active')
-    .forEach(el => el.classList.remove('active'));
-  document.querySelector('.nav-dropdown-item[data-feature="screenshot-analysis"]')
-    .classList.add('active');
-  // 左右面板显示隐藏
-  document.querySelectorAll('.feature-content-block')
-    .forEach(el => el.classList.remove('active'));
-  document.getElementById('left-panel-screenshot-analysis').classList.add('active');
-  document.getElementById('right-panel-screenshot-analysis').classList.add('active');
-}
-
-// —— 选中历史并渲染分析 —— 
-function selectHistoryItem(li, { image_url, analysis }) {
-  // 左侧高亮
-  const list = document.getElementById('ss-history-list');
-  list.querySelectorAll('li.selected').forEach(el => el.classList.remove('selected'));
-  li.classList.add('selected');
-
-  // 渲染右侧
-  const mainEl = document.getElementById('ss-ai-analysis');
-  mainEl.dataset.sourceUrl = image_url;
-  mainEl.innerHTML = '';
-  const div = document.createElement('div');
-  div.className = 'message-content';
-  processAIMessage(div, analysis||'无分析内容', 'analysis_result');
-  mainEl.appendChild(div);
-  if (typeof renderLatexInElement==='function') renderLatexInElement(mainEl);
-}
-
-
-function initSocketIO() {
-    socket = io({
-        path: '/socket.io',
-        auth: { token: TOKEN },
-        transports: ['websocket']
-    });
-
-    socket.on('connect', function() {
-        console.log('[Socket] Connected to server');
-        const statusEl = document.getElementById('connection-status');
-        if (statusEl) statusEl.textContent = '已连接';
-        if (typeof getApiInfo === 'function') getApiInfo(); 
-    });
-
-    socket.on('connect_error', function(error) {
-        console.error('[Socket] Connection error:', error.message);
-        const statusEl = document.getElementById('connection-status');
-        if (statusEl) statusEl.textContent = '连接失败: ' + error.message;
-    });
-
-        // 流式响应处理
-    socket.on('chat_stream_chunk', data => {
-        console.log('[STREAM CHUNK RECEIVED] Chunk:', JSON.stringify(data.chunk), 'ReqID:', data.request_id, 'Provider:', data.provider, 'Model:', data.model_id);
-      
-        const chatHistoryEl = document.getElementById('chat-chat-history');
-        if (!chatHistoryEl) return;
-
-        // 1. 找 aiDiv（非 thinking 状态）
-        let aiDiv = chatHistoryEl.querySelector(`.ai-message[data-request-id="${data.request_id}"]`);
-
-        // 2. 如果不存在，就移除 thinking、创建 aiDiv 和内容容器
-        if (!aiDiv) {
-            const thinkingEl = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${data.request_id}"]`);
-            if (thinkingEl) removeThinkingIndicator(chatHistoryEl, thinkingEl);
-
-            aiDiv = document.createElement('div');
-            aiDiv.className = 'ai-message';
-            aiDiv.dataset.requestId = data.request_id;
-            if (data.provider) aiDiv.dataset.provider = data.provider;
-
-            // 创建内容容器
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
-            aiDiv.appendChild(contentDiv);
-
-            // 初始化 buffer
-            aiDiv._streamBuffer = '';
-
-            chatHistoryEl.appendChild(aiDiv);
-        }
-
-        // 3. 确保 contentDiv 一定存在
-        let contentDiv = aiDiv.querySelector('.message-content');
-        if (!contentDiv) {
-            contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
-            aiDiv.appendChild(contentDiv);
-            aiDiv._streamBuffer = aiDiv._streamBuffer || '';
-        }
-
-        // 4. 累积 chunk 到 buffer
-        aiDiv._streamBuffer += data.chunk || '';
-
-        //5. 实时 Markdown + KaTeX 渲染
-        contentDiv.innerHTML = md.render(aiDiv._streamBuffer);
-        renderLatexInElement(contentDiv);
-        // contentDiv.textContent = aiDiv._streamBuffer
-
-        // 6. 滚到底部
-        scrollToChatBottom(chatHistoryEl);
-    });
-
-
-
-    /* =========================================================
-   Socket 处理：chat_stream_end
-   ========================================================= */
-    socket.on('chat_stream_end', (data) => {
-        console.log('[STREAM END RECEIVED] Data:', data); // 打印整个 data 对象
-        console.log(`[Socket] 'chat_stream_end'  reqId=${data.request_id}`);
-        console.log(`[STREAM END RECEIVED] Request ID: ${data.request_id}`);
-        console.log(`[STREAM END RECEIVED] Provider: ${data.provider}`);
-        console.log(`[STREAM END RECEIVED] Model ID: ${data.model_id}`);
-        console.log(`[STREAM END RECEIVED] Full Message (first 100 chars): ${(data.full_message || '').substring(0, 100)}...`);
-        // 如果 full_message 可能很长，只打印一部分或者检查其长度
-        if (data.full_message) {
-            console.log(`[STREAM END RECEIVED] Full Message Length: ${data.full_message.length}`);
-        } else {
-            console.log('[STREAM END RECEIVED] Full Message is empty or undefined.');
-        }
-        const chatHistoryEl = document.getElementById('chat-chat-history');
-        if (!chatHistoryEl) {
-            console.error('[chat_stream_end] chatHistoryEl NOT found');
-            return;
-        }
-
-        /* ---------- 1. 找到或创建消息容器 ---------- */
-        let aiDiv = chatHistoryEl.querySelector(
-            `.ai-message[data-request-id="${data.request_id}"]:not(.ai-thinking)`
-        );
-
-        if (!aiDiv) {
-            // 若流式开始时 UI 还没占位，则现在补一个
-            console.warn(`[chat_stream_end] no div for ${data.request_id}, create one`);
-            chatHistoryEl.querySelector(
-            `.ai-thinking[data-request-id="${data.request_id}"]`
-            )?.remove();                               // 清掉可能残留的“思考中”
-
-            aiDiv = document.createElement('div');
-            aiDiv.className = 'ai-message';
-            aiDiv.dataset.requestId = data.request_id;
-            if (data.provider) aiDiv.dataset.provider = data.provider;
-            chatHistoryEl.appendChild(aiDiv);
-        }
-
-        /* ---------- 2. 渲染 Markdown / KaTeX / 代码高亮 ---------- */
-        if (aiDiv instanceof HTMLElement) {
-            processAIMessage(aiDiv, data.full_message || '', 'chat_stream_end');
-            scrollToChatBottom(chatHistoryEl);
-        }
-
-        /* ---------- 3. 更新本地会话历史 (chatSessions[]) ---------- */
-        const sid = data.session_id || currentChatSessionId;
-        if (!sid) {
-            console.warn('[History] no active session id');
-            return;
-        }
-
-        const session = chatSessions.find(s => s.id === sid);
-        if (!session) {
-            console.warn(`[History] session ${sid} not found`);
-            return;
-        }
-
-        const idx = session.history.findIndex(
-            m => m.role === 'model' && m.temp_id === data.request_id
-        );
-        if (idx === -1) {
-            console.warn(`[History] placeholder not found for req ${data.request_id}`);
-            return;
-        }
-
-        session.history[idx].parts = [{ text: data.full_message || '' }];
-        if (data.provider) session.history[idx].provider = data.provider;
-        delete session.history[idx].temp_id;
-
-        saveChatSessionsToStorage();
-        bumpActiveChatSessionToTop();
-        console.log(`[History] updated AI msg in session ${sid} (stream end)`);
-    });
-
-        // 处理非流式的完整回复
-    socket.on('chat_response', function(data) {
-    console.log('<<<<< [Socket RECEIVED] chat_response (NON-STREAMING) >>>>>', data);
-    const chatHistoryEl = document.getElementById('chat-chat-history');
-    if (!chatHistoryEl) {
-        console.error("[chat_response] Critical: chatHistoryEl (#chat-chat-history) not found.");
-        return;
-    }
-
-    // 1. 移除思考中指示器
-    // 假设你的思考指示器有 data-request-id="${data.request_id}" 并且 class 'ai-thinking'
-    const thinkingDiv = chatHistoryEl.querySelector(`.ai-thinking[data-request-id="${data.request_id}"]`);
-    if (thinkingDiv && typeof removeThinkingIndicator === 'function') {
-        removeThinkingIndicator(chatHistoryEl, thinkingDiv);
-    } else if (thinkingDiv) {
-        thinkingDiv.remove(); // 简单的移除
-        console.warn("removeThinkingIndicator function not found, used direct remove().");
-    }
-
-    // 2. 创建或找到用于显示AI回复的div
-    // 通常，对于非流式，我们可能不会预先创建占位div，而是直接追加新消息。
-    // 但如果你的 sendChatMessage 为非流式也创建了占位（例如 thinkingDiv 本身就是占位），则需要找到它。
-    // 这里我们假设直接创建一个新的AI消息div。
-    let aiDiv = chatHistoryEl.querySelector(`.ai-message[data-request-id="${data.request_id}"]:not(.ai-thinking)`);
-    if (!aiDiv) { // 如果流式逻辑意外地没有完全清理，或者没有占位符
-        aiDiv = document.createElement('div');
-        aiDiv.className = 'ai-message'; // 基础类名
-        aiDiv.dataset.requestId = data.request_id; // 绑定 request ID
-        chatHistoryEl.appendChild(aiDiv);
-    }
-    // 如果 aiDiv 已经存在（例如由 thinkingDiv 转换而来），确保它没有 streaming span
-    const streamingSpan = aiDiv.querySelector('.ai-response-text-streaming');
-    if (streamingSpan) streamingSpan.remove();
-
-
-    if (data.provider) { // 如果服务器提供了 provider 信息
-        aiDiv.dataset.provider = data.provider;
-    }
-    
-    // 3. 更新界面显示 (调用 processAIMessage)
-    // processAIMessage 会处理 Markdown, KaTeX 等，并放入 aiDiv
-    if (typeof processAIMessage === 'function') {
-        processAIMessage(aiDiv, data.message || 'AI未返回信息。', "chat_response_non_stream");
-    } else {
-        console.error("processAIMessage function is not defined! Cannot render AI message.");
-        // Fallback: display raw text if processAIMessage is missing
-        const tempContentDiv = document.createElement('div');
-        tempContentDiv.className = 'message-content';
-        tempContentDiv.textContent = data.message || 'AI未返回信息。 (Renderer missing)';
-        // 如果 aiDiv 还没有 provider strong 标签，可以简单添加
-        let strongTag = aiDiv.querySelector('strong');
-        if (!strongTag) {
-            strongTag = document.createElement('strong');
-            strongTag.textContent = `${data.provider || 'AI'}: `;
-            aiDiv.insertBefore(strongTag, aiDiv.firstChild);
-        }
-        aiDiv.appendChild(tempContentDiv);
-    }
-    
-    // 4. 滚动到底部
-    if (typeof scrollToChatBottom === 'function') {
-        scrollToChatBottom(chatHistoryEl);
-    }
-
-    // 5. 更新 localStorage 中的聊天历史 (与 chat_stream_end 中的逻辑非常相似)
-    // 假设 currentChatSessionId 和 chatSessions 是可访问的
-    const activeSessionId = data.session_id || currentChatSessionId; 
-    if (activeSessionId && typeof chatSessions !== 'undefined' && typeof saveChatSessionsToStorage === 'function') {
-        const sessionToUpdate = chatSessions.find(s => s.id === activeSessionId);
-        if (sessionToUpdate) {
-            // 查找内存中对应的AI消息占位符 (它应该有 temp_id)
-            const messageIndex = sessionToUpdate.history.findIndex(
-                msg => msg.role === 'model' && msg.temp_id === data.request_id 
-            );
-            if (messageIndex !== -1) {
-                sessionToUpdate.history[messageIndex].parts = [{ text: data.message || '' }];
-                if (data.provider) {
-                    sessionToUpdate.history[messageIndex].provider = data.provider;
-                }
-                delete sessionToUpdate.history[messageIndex].temp_id; // **非常重要：移除temp_id**
-                console.log(`[History] Updated AI message in session ${activeSessionId} for request ${data.request_id} (non-stream) and removed temp_id.`);
-                saveChatSessionsToStorage();
-            } else {
-                // 如果没有找到占位符，这可能表示 sendChatMessage 没有为非流式请求添加占位符
-                // 或者 request_id 管理仍有问题。
-                // 一个简化的处理可以是，如果找不到就直接追加（但这可能导致重复或顺序问题）
-                console.warn(`[History] Could not find placeholder AI message (non-stream) for request ${data.request_id} in session ${activeSessionId}. Appending new message.`);
-                sessionToUpdate.history.push({
-                    role: 'model',
-                    parts: [{ text: data.message || '' }],
-                    provider: data.provider || 'AI'
-                    // 不应该有 temp_id 因为这是最终消息
-                });
-                saveChatSessionsToStorage();
-            }
-        } else {
-            console.warn(`[History] Could not find session ${activeSessionId} to update AI message (non-stream).`);
-        }
-    } else {
-        console.warn("[History] No active session ID found or chatSessions/saveChatSessionsToStorage not available for non-stream AI message history update.");
-    }
-});
-
-    socket.on('new_screenshot', function(data) {
-    console.log('<<<<< [Socket RECEIVED] new_screenshot >>>>>', data);
-    // data 预期格式: { image_url: "...", analysis: "...", prompt: "...", timestamp: ..., provider: "..." }
-
-    if (typeof addHistoryItem === 'function') {
-        addHistoryItem(data); // addHistoryItem 会创建列表项并处理点击事件
-    } else {
-        console.warn("Function addHistoryItem is not defined. Cannot add to screenshot history.");
-    }
-
-    // 可选：如果你希望新截图立即显示在主区域（而不仅仅是添加到历史列表）
-    // 通常是点击历史条目才显示在主区域，但这里提供一个立即显示的选择
-    const shouldDisplayImmediately = false; // 改为 true 如果你想立即显示
-    if (shouldDisplayImmediately) {
-        const mainAnalysisEl = document.getElementById('ss-ai-analysis');
-        const mainImagePreviewEl = document.getElementById('ss-main-preview-image');
-
-        if (mainAnalysisEl) {
-            mainAnalysisEl.innerHTML = ''; // 清空
-            const analysisContentDiv = document.createElement('div');
-            analysisContentDiv.className = 'message-content';
-            processAIMessage(analysisContentDiv, data.analysis || 'AI分析完成，但无文本结果。', 'new_screenshot_immediate_analysis');
-            mainAnalysisEl.appendChild(analysisContentDiv);
-            mainAnalysisEl.dataset.sourceUrl = data.image_url;
-        }
-        if (mainImagePreviewEl) {
-            mainImagePreviewEl.src = data.image_url + '?t=' + Date.now();
-            mainImagePreviewEl.alt = `截图预览 - ${new Date((data.timestamp || Date.now()/1000) * 1000).toLocaleString()}`;
-            mainImagePreviewEl.style.display = 'block';
-        }
-    }
-});
-
-    socket.on('analysis_stream_chunk', chunk => {
-        // 只在开启流式时处理
-        if (!ssIsStreaming) return;
-
-        const analysisEl = document.getElementById('ss-ai-analysis');
-        // 如果这是流的第一块，先调用一次 processAIMessage 来初始化容器
-        if (!analysisEl.querySelector('.message-content')) {
-        const container = document.createElement('div');
-        container.className = 'message-content';
-        analysisEl.appendChild(container);
-        // processAIMessage 也支持以空字符串开头
-        processAIMessage(container, '', 'analysis_stream');
-        }
-        // 追加新内容
-        const container = analysisEl.querySelector('.message-content');
-        processAIMessage(container, chunk.text, 'analysis_stream');
-    });
-
+// 注意：以下所有socket事件监听代码已移动到initSocket函数中，此处代码不再执行
+/* 
   // 3. 非流式一次性结果
   socket.on('analysis_result', data => {
     if (ssIsStreaming) return;
@@ -2429,7 +1658,7 @@ function initSocketIO() {
     // });
     // ===== 语音识别文本 =====
     // 监听 STT 结果
-    // 接收语音转写结果，更新“识别结果”并提示 AI 正在回复
+    // 接收语音转写结果，更新"识别结果"并提示 AI 正在回复
     socket.on('stt_result', (data) => {
     // 只处理当前这次录音请求的结果
         if (data.request_id !== window.currentVoiceRequestId) return;
@@ -2498,34 +1727,19 @@ function initSocketIO() {
         if (voiceResultEl && data.request_id === window.currentVoiceRequestId) {
             voiceResultEl.innerHTML = ''; // 清空之前的所有状态
 
-            const sttProviderText = data.stt_provider || 'STT';
-            const transcriptText = data.transcript || '未提供识别文本';
-            const chatProviderText = data.chat_provider || 'AI';
-            const chatModelIdText = data.chat_model_id || '';
-
-            // 正确构建 HTML
-            const transcriptHtmlSegment = `
-                <div style="margin-bottom:0.5rem;">
-                    <strong><i class="fas fa-comment-dots"></i> 识别结果 (${escapeHtml(sttProviderText)}):</strong>
-                    <div class="message-content-simple">${escapeHtml(transcriptText)}</div>
-                </div>
-                <hr>`;
-            
-            voiceResultEl.innerHTML = transcriptHtmlSegment;
+            const transcriptHtml = `<div style="margin-bottom:0.5rem;"><strong><i class="fas fa-comment-dots"></i> 识别结果 (<span class="math-inline">\{data\.stt\_provider \|\| 'STT'\}\)\:</strong\><div class\="message\-content\-simple"\></span>{escapeHtml(data.transcript || '未提供识别文本')}</div></div>`;
 
             const aiResponseContainer = document.createElement('div');
-            aiResponseContainer.innerHTML = `<strong><i class="fas fa-robot"></i> AI回答 (${escapeHtml(chatProviderText)}${chatModelIdText ? `/${escapeHtml(chatModelIdText)}` : ''}):</strong>`;
+            aiResponseContainer.innerHTML = `<strong><i class="fas fa-robot"></i> AI回答 (${data.chat_provider || 'AI'}):</strong>`;
 
             const aiMessageDiv = document.createElement('div');
-            aiMessageDiv.className = 'ai-message'; 
+            aiMessageDiv.className = 'ai-message'; // 复用聊天消息样式
             aiMessageDiv.dataset.provider = data.chat_provider || 'AI'; 
-            if (data.chat_model_id) {
-                aiMessageDiv.dataset.modelId = data.chat_model_id; // 设置 modelId
-            }
-            
-            processAIMessage(aiMessageDiv, data.message || 'AI未返回有效回复。', 'voice_chat_response');
-            
+            processAIMessage(aiMessageDiv, data.message || 'AI未返回有效回复。', 'voice_chat_response'); // 使用 processAIMessage 渲染
+
             aiResponseContainer.appendChild(aiMessageDiv);
+
+            voiceResultEl.innerHTML = transcriptHtml + '<hr>';
             voiceResultEl.appendChild(aiResponseContainer);
 
             addVoiceHistoryItem({ // 添加到左侧语音历史
@@ -2563,75 +1777,7 @@ function initSocketIO() {
         }
     });
 
-    /* =========================================================
-   Socket 事件：服务器返回语音回答
-   data: {
-     audio_url   : String  服务器保存的音频文件 URL（或 blob URL）
-     transcript  : String  识别文本
-     response    : String  AI文字回答
-     timestamp   : Number  (可选) 服务器统一时间戳 ms
-   }
-   ========================================================= */
-    socket.on('voice_answer_ready', (data) => {
-    if (!data) return;
-
-    // ---------- 1. 播放音频 ----------
-    const audioPlayer = document.getElementById('voice-answer-player');
-    const audioSrc    = document.getElementById('voice-answer-source');
-    if (audioPlayer && audioSrc && data.audio_url) {
-        audioSrc.src = data.audio_url;
-        audioPlayer.load();                 // 刷新 <audio>
-        audioPlayer.style.removeProperty('display');
-        audioPlayer.play().catch(() => {}); // 自动播放失败也不报错
-    }
-
-    // ---------- 2. 在右侧结果区域显示文字 ----------
-    const vr = document.getElementById('voice-result');
-    if (vr) {
-        vr.innerHTML = '';                             // 先清空
-        const transcriptHTML = `
-        <div style="margin-bottom:0.5rem;">
-            <strong><i class="fas fa-comment-dots"></i> 识别结果:</strong>
-            <div class="message-content-simple">${escapeHtml(data.transcript || '')}</div>
-        </div><hr>`;
-        vr.insertAdjacentHTML('beforeend', transcriptHTML);
-
-        // 用 processAIMessage 渲染 AI 回答（含 Markdown / KaTeX）
-        const aiWrap = document.createElement('div');
-        aiWrap.innerHTML = '<strong><i class="fas fa-robot"></i> AI回答:</strong>';
-        const aiDiv = document.createElement('div');
-        aiDiv.className = 'ai-message';
-        processAIMessage(aiDiv, data.response || '无回答', 'voice_answer_ready');
-        aiWrap.appendChild(aiDiv);
-        vr.appendChild(aiWrap);
-        scrollToChatBottom(vr);
-    }
-
-    // ---------- 3. 写入 voiceHistory 数组并保存 ----------
-    const ts = data.timestamp ?? Date.now();
-    const item = {
-        timestamp : ts,
-        transcript: data.transcript || '',
-        response  : data.response   || '',
-        audio_url : data.audio_url  || ''
-    };
-    addVoiceHistoryItem(item);   // 会自动 push/unshift + saveVoiceHistory()
-    });
-
-
-    socket.on('chat_error', function(data) {
-        console.error('[Socket] Chat error:', data.error);
-        const chatHistoryEl = document.getElementById('chat-chat-history');
-        if (!chatHistoryEl) return;
-
-        const errorDiv = document.createElement('div');
-        errorDiv.className = 'system-message';
-        errorDiv.textContent = 'Error: ' + (data.error || 'An error occurred while processing your request.');
-        chatHistoryEl.appendChild(errorDiv);
-        scrollToChatBottom(chatHistoryEl);
-    });
-
-    }
+    // 注意: 下面的Socket.IO事件监听器已移到initSocket函数中// 这些注释仅作为参考，实际代码在initSocket函数内
 
 
 
@@ -2659,7 +1805,7 @@ function addVoiceHistoryItem(item, skipSave = false) {
   }
 
   /* ---------- 2. 渲染 <li> ---------- */
-  const ts = item.timestamp ?? Date.now();
+  const ts = item.timestamp !== undefined && item.timestamp !== null ? item.timestamp : Date.now();
   const li = document.createElement('li');
   li.className          = 'history-item voice-history-item';
   li.dataset.id         = String(ts);
@@ -2680,7 +1826,7 @@ function addVoiceHistoryItem(item, skipSave = false) {
   actions.className = 'history-item-actions';
   actions.appendChild(createDeleteButton(() => {
     if (!confirm('确定要删除此语音记录吗?')) return;
-    voiceHistory = voiceHistory.filter(v => String(v.timestamp??v.id) !== String(ts));
+    voiceHistory = voiceHistory.filter(v => String(v.timestamp !== undefined && v.timestamp !== null ? v.timestamp : v.id) !== String(ts));
     saveVoiceHistory();
     li.remove();
     const vr = document.getElementById('voice-result');
@@ -3128,6 +2274,10 @@ function confirmCrop() {
 
 // Make sure initAllFeatures is the last thing called or is wrapped in DOMContentLoaded
 document.addEventListener('DOMContentLoaded', () => {
+  // 首先初始化Socket连接
+  initSocket(); 
+  
+  // 然后初始化其他功能
   initAllFeatures();
 });
 
@@ -3145,13 +2295,7 @@ document.addEventListener('DOMContentLoaded', () => {
  * 发送聊天消息（文本、选择的文件、粘贴的图片）。
  * 所有类型的消息（包括纯文本）都将通过 HTTP POST 请求发送到 /chat_with_file 接口。
  */
-async function sendChatMessage() {
-    // --- 0. 获取必要的DOM元素和状态 ---
-    const chatInputEl = document.getElementById('chat-chat-input');
-    const chatHistoryEl = document.getElementById('chat-chat-history');
-    const previewWrapEl = document.getElementById('chat-upload-preview');
-    const useStreaming = document.getElementById('streaming-toggle-checkbox').checked; // 后端会决定是否流式
-    console.log("[MAIN.JS SEND] useStreaming checkbox value:", useStreaming); // 添加日志
+async function sendChatMessage() {    // --- 0. 获取必要的DOM元素和状态 ---    const chatInputEl = document.getElementById('chat-chat-input');    const chatHistoryEl = document.getElementById('chat-chat-history');    const previewWrapEl = document.getElementById('chat-upload-preview');        // 获取流式设置，如果元素不存在则默认为true    const streamingCheckbox = document.getElementById('streaming-toggle-checkbox');    const useStreaming = streamingCheckbox ? streamingCheckbox.checked : true; // 后端会决定是否流式
 
     // --- 1. 基础校验 ---
     if (!chatInputEl || !chatHistoryEl || !previewWrapEl) {
@@ -3182,10 +2326,6 @@ async function sendChatMessage() {
         debugLog("sendChatMessage: No content (text, files, or pasted images) to send.");
         return; // 没有内容可发送
     }
-    // if (!inputText && filesSelected.length === 0 && imagesPastedBase64.length === 0) {
-    //     debugLog("sendChatMessage: No content (text, files, or pasted images) to send.");
-    //     return; // 没有内容可发送
-    // }
 
     // --- 2. 获取或创建当前聊天会话 ---
     let currentSession = chatSessions.find(s => s.id === currentChatSessionId);
@@ -3279,9 +2419,8 @@ async function sendChatMessage() {
         chatHistoryEl.firstElementChild.remove();
     }
 
-    // --- 5. 准备AI请求ID和“思考中”UI ---
+    // --- 5. 准备AI请求ID和"思考中"UI ---
     const requestId = generateUUID();
-    console.log(`[SEND CHAT] Frontend generated requestId: ${requestId}`);
     const thinkingIndicatorDiv = document.createElement('div');
     thinkingIndicatorDiv.className = 'ai-message ai-thinking';
     thinkingIndicatorDiv.dataset.requestId = requestId;
@@ -3356,4 +2495,972 @@ async function sendChatMessage() {
 
     if (typeof saveChatSessionsToStorage === "function") saveChatSessionsToStorage();
     if (typeof bumpActiveChatSessionToTop === "function") bumpActiveChatSessionToTop();
+}
+
+// Socket.IO初始化函数 - 使用全局socket变量
+
+function initSocket() {
+  if (socket !== null) return; // 已初始化则直接返回
+  
+  try {
+    console.log('Initializing Socket.IO...');
+    socket = io();
+    
+    // 所有socket事件监听绑定
+    socket.on('connect', function() {
+      console.log('Connected to server');
+      const connectionStatus = document.getElementById('connection-status');
+      if (connectionStatus) {
+        connectionStatus.className = 'connected';
+        connectionStatus.innerText = '已连接';
+      }
+      updateConnectionStatus(true);
+    });
+
+    socket.on('disconnect', function() {
+      console.log('Disconnected from server');
+      const connectionStatus = document.getElementById('connection-status');
+      if (connectionStatus) {
+        connectionStatus.className = 'disconnected';
+        connectionStatus.innerText = '已断开';
+      }
+      updateConnectionStatus(false);
+    });
+
+    // 新增socket事件监听
+    socket.on('new_screenshot', function(data) {
+      console.log('Received new screenshot:', data);
+      if (typeof appendScreenshot === 'function') {
+        appendScreenshot(data);
+      }
+    });
+
+    socket.on('history', function(data) {
+      console.log('Received history, items:', data?.length);
+      if (Array.isArray(data)) {
+        data.forEach(item => {
+          if (typeof appendScreenshot === 'function') {
+            appendScreenshot(item);
+          }
+        });
+      }
+    });
+
+    socket.on('api_info', function(data) {
+      console.log('API Info:', data);
+      if (typeof updateApiInfoDisplay === 'function') {
+        updateApiInfoDisplay(data);
+      } else if (typeof updateApiInfo === 'function') {
+        updateApiInfo(data);
+      }
+    });
+    
+    // 截图分析流式响应
+    socket.on('analysis_stream_chunk', chunk => {
+      // 只在开启流式时处理
+      if (!ssIsStreaming) return;
+
+      const analysisEl = document.getElementById('ss-ai-analysis');
+      // 如果这是流的第一块，先调用一次 processAIMessage 来初始化容器
+      if (!analysisEl.querySelector('.message-content')) {
+        const container = document.createElement('div');
+        container.className = 'message-content';
+        analysisEl.appendChild(container);
+        // processAIMessage 也支持以空字符串开头
+        processAIMessage(container, '', 'analysis_stream');
+      }
+      // 追加新内容
+      const container = analysisEl.querySelector('.message-content');
+      processAIMessage(container, chunk.text, 'analysis_stream');
+    });
+    
+    // 非流式一次性结果
+    socket.on('analysis_result', data => {
+      if (ssIsStreaming) return;
+      console.log('[Socket] analysis_result', data);
+
+      // 切到截图分析面板
+      if (typeof switchToScreenshotPanel === 'function') {
+        switchToScreenshotPanel();
+      }
+
+      // 显示裁剪按钮
+      const cropButton = document.getElementById('ss-crop-current-btn');
+      if (cropButton) cropButton.style.display = 'inline-block';
+
+      // 确保历史列表并更新
+      if (typeof ensureHistoryItem === 'function' && typeof selectHistoryItem === 'function') {
+        const li = ensureHistoryItem(data.image_url, data.analysis);
+        // 自动渲染
+        selectHistoryItem(li, data);
+      }
+    });
+    
+    // 分析错误
+    socket.on('analysis_error', function(data) {
+      console.error('<<<<< [Socket RECEIVED] analysis_error >>>>>', data);
+      // data: { request_id: "?", image_url: "...", error: "..." }
+      const mainAnalysisEl = document.getElementById('ss-ai-analysis');
+      // 如果错误是针对当前显示的图片，或者主分析区是空的/初始状态
+      if (mainAnalysisEl && (mainAnalysisEl.dataset.sourceUrl === data.image_url || 
+          mainAnalysisEl.textContent.includes('请在左侧点击历史记录') || 
+          mainAnalysisEl.textContent.includes('等待截屏和分析中'))) {
+          mainAnalysisEl.innerHTML = `<p class="error-message"><strong>图片分析错误 (${data.image_url || '未知图片'}):</strong> ${escapeHtml(data.error)}</p>`;
+      }
+      // 也可以在对应的历史条目旁显示错误图标
+      const historyListEl = document.getElementById('ss-history-list');
+      if (historyListEl) {
+          const listItem = historyListEl.querySelector(`li[data-url="${data.image_url}"]`);
+          if (listItem) {
+              // 示例：添加一个错误提示到历史条目
+              let errorHint = listItem.querySelector('.history-item-error-hint');
+              if (!errorHint) {
+                  errorHint = document.createElement('span');
+                  errorHint.className = 'history-item-error-hint';
+                  errorHint.style.color = 'red';
+                  errorHint.style.fontSize = '0.8em';
+                  errorHint.textContent = ' (分析失败)';
+                  const timestampDiv = listItem.querySelector('.history-item-text');
+                  if(timestampDiv) timestampDiv.appendChild(errorHint);
+              }
+          }
+      }
+    });
+    
+    // 语音识别结果
+    socket.on('stt_result', (data) => {
+      // 只处理当前这次录音请求的结果
+      if (data.request_id !== window.currentVoiceRequestId) return;
+
+      const vr = document.getElementById('voice-result');
+      if (!vr) return;
+
+      vr.innerHTML = `
+          <div><i class="fas fa-comment-dots"></i> 识别结果 (${escapeHtml(data.provider || 'STT')}):</div>
+          <div class="message-content-simple" style="margin:8px 0;">
+          ${escapeHtml(data.transcript || '未提供识别文本')}
+          </div>
+          <div><i class="fas fa-spinner fa-spin"></i> AI 正在回复…</div>
+      `;
+    });
+    
+    // 语音文本回答
+    socket.on('voice_answer_text', data => {
+      // 把回答也显示到界面上（可选）
+      const ui = document.getElementById('voice-result');
+      if (ui) ui.innerHTML += `<div>AI 回答：${escapeHtml(data.text)}</div>`;
+
+      // 调用浏览器 TTS
+      if ('speechSynthesis' in window) {
+          const utterance = new SpeechSynthesisUtterance(data.text);
+          // 可选：设置语音、速度、音调
+          // utterance.voice = speechSynthesis.getVoices().find(v => v.lang.startsWith('zh'));
+          // utterance.rate = 1;
+          window.speechSynthesis.speak(utterance);
+      } else {
+          console.warn('当前浏览器不支持 SpeechSynthesis');
+      }
+    });
+    
+    // 语音音频URL
+    socket.on('voice_answer_audio', data => {
+      console.log('[Socket] voice_answer_audio', data);
+      if (data.request_id !== window.currentVoiceRequestId) return;
+      const player = document.getElementById('voice-answer-player');
+      const src    = document.getElementById('voice-answer-source');
+      if (!player || !src) return;
+
+      src.src = data.audio_url;          // 填入后端生成的 MP3 地址
+      player.style.display = 'block';    // 确保可见
+      player.load();                     // 重新加载音源
+      // （可选）自动播放：
+      // player.play().catch(e=>console.warn('自动播放失败', e));
+    });
+    
+    // 语音识别错误
+    socket.on('stt_error', function(data) {
+      console.error('<<<<< [Socket RECEIVED] stt_error >>>>>', data);
+      const voiceResultEl = document.getElementById('voice-result');
+      if (voiceResultEl && data.request_id === window.currentVoiceRequestId) {
+          voiceResultEl.innerHTML = `<p class="error-message"><strong>语音识别错误 (${data.provider || 'STT'}):</strong> ${escapeHtml(data.error)}</p>`;
+          // 重置录音按钮状态
+          document.getElementById('voice-start-recording').disabled = false;
+          document.getElementById('voice-stop-recording').disabled = true;
+      }
+    });
+    
+    // 语音聊天响应
+    socket.on('voice_chat_response', function(data) {
+      console.log('<<<<< [Socket RECEIVED] voice_chat_response >>>>>', data);
+      const voiceResultEl = document.getElementById('voice-result');
+      if (voiceResultEl && data.request_id === window.currentVoiceRequestId) {
+          voiceResultEl.innerHTML = ''; // 清空之前的所有状态
+
+          const transcriptHtml = `<div style="margin-bottom:0.5rem;"><strong><i class="fas fa-comment-dots"></i> 识别结果 (${data.stt_provider || 'STT'}):</strong><div class="message-content-simple">${escapeHtml(data.transcript || '未提供识别文本')}</div></div>`;
+
+          const aiResponseContainer = document.createElement('div');
+          aiResponseContainer.innerHTML = `<strong><i class="fas fa-robot"></i> AI回答 (${data.chat_provider || 'AI'}):</strong>`;
+
+          const aiMessageDiv = document.createElement('div');
+          aiMessageDiv.className = 'ai-message'; // 复用聊天消息样式
+          aiMessageDiv.dataset.provider = data.chat_provider || 'AI'; 
+          processAIMessage(aiMessageDiv, data.message || 'AI未返回有效回复。', 'voice_chat_response'); // 使用 processAIMessage 渲染
+
+          aiResponseContainer.appendChild(aiMessageDiv);
+
+          voiceResultEl.innerHTML = transcriptHtml + '<hr>';
+          voiceResultEl.appendChild(aiResponseContainer);
+
+          if (typeof addVoiceHistoryItem === "function") {
+            addVoiceHistoryItem({ // 添加到左侧语音历史
+              transcript: data.transcript,
+              response: data.message,
+              // provider: data.chat_provider // 可选
+            });
+          }
+
+          // 重置录音按钮状态
+          document.getElementById('voice-start-recording').disabled = false;
+          document.getElementById('voice-stop-recording').disabled = true;
+          scrollToChatBottom(voiceResultEl);
+      }
+    });
+    
+    socket.on('api_info', function(data) {
+        console.log('<<<<< [Socket RECEIVED] api_info >>>>>', data);
+        if (typeof updateApiInfo === 'function') {
+            updateApiInfo(data); // data 应该包含 { provider: "..." }
+        } else {
+            console.error("updateApiInfo function is not defined.");
+        }
+    });
+
+    socket.on('voice_answer', function(data) {
+        console.log('[Socket] Received voice answer:', data);
+        const audioPlayer = document.getElementById('voice-answer-player');
+        const audioSource = document.getElementById('voice-answer-source');
+
+        if (audioPlayer && audioSource && data.audio_url) {
+            audioSource.src = data.audio_url;
+            audioPlayer.load();
+            audioPlayer.style.display = 'block';
+            audioPlayer.play().catch(err => console.error('[Voice] Playback error:', err));
+        }
+    });
+
+    // 注意: 下面的Socket.IO事件监听器已移到initSocket函数中// 这些注释仅作为参考，实际代码在initSocket函数内
+
+
+
+
+
+
+
+/* =========================================================
+   addVoiceHistoryItem — 语音历史条目
+   ========================================================= */
+/* =========================================================
+   addVoiceHistoryItem — 语音历史条目
+   ========================================================= */
+function addVoiceHistoryItem(item, skipSave = false) {
+  const listEl = document.getElementById('voice-history-list');
+  if (!listEl || !item) {
+    console.warn('[VoiceHistory] list element or item missing:', item);
+    return;
+  }
+
+  /* ---------- 1. 只有新纪录才写入并保存 ---------- */
+  if (!skipSave) {
+    voiceHistory.unshift(item);            // 用 push 就改 push
+    saveVoiceHistory();
+  }
+
+  /* ---------- 2. 渲染 <li> ---------- */
+  const ts = item.timestamp !== undefined && item.timestamp !== null ? item.timestamp : Date.now();
+  const li = document.createElement('li');
+  li.className          = 'history-item voice-history-item';
+  li.dataset.id         = String(ts);
+  li.dataset.transcript = item.transcript || '无法识别';
+  li.dataset.response   = item.response   || '无回答';
+
+  const wrapper  = document.createElement('div');
+  wrapper.className = 'history-item-content-wrapper';
+  const tsStr = new Date(ts).toLocaleString([], {dateStyle:'short',timeStyle:'short',hour12:false});
+  wrapper.innerHTML = `
+    <div><strong><i class="fas fa-clock"></i> ${tsStr}</strong></div>
+    <div title="${escapeHtml(item.transcript||'')}">
+      <i class="fas fa-comment-dots"></i> ${escapeHtml((item.transcript||'').slice(0,30))}${item.transcript&&item.transcript.length>30?'…':''}
+    </div>`;
+
+  /* 删除按钮 */
+  const actions = document.createElement('div');
+  actions.className = 'history-item-actions';
+  actions.appendChild(createDeleteButton(() => {
+    if (!confirm('确定要删除此语音记录吗?')) return;
+    voiceHistory = voiceHistory.filter(v => String(v.timestamp !== undefined && v.timestamp !== null ? v.timestamp : v.id) !== String(ts));
+    saveVoiceHistory();
+    li.remove();
+    const vr = document.getElementById('voice-result');
+    if (vr && vr.dataset.associatedId === String(ts)) {
+      vr.textContent = '点击下方按钮开始录音，识别结果和 AI 回答将显示在此处。';
+      delete vr.dataset.associatedId;
+    }
+  }));
+
+  li.appendChild(wrapper);
+  li.appendChild(actions);
+
+  /* 点击回放 */
+  li.addEventListener('click', e => {
+    if (e.target.closest('.history-item-actions')) return;
+    const vr = document.getElementById('voice-result');
+    if (!vr) return;
+    vr.innerHTML = `
+      <div style="margin-bottom:.5rem;">
+        <strong><i class="fas fa-comment-dots"></i> 识别结果:</strong>
+        <div class="message-content-simple">${escapeHtml(item.transcript||'')}</div>
+      </div><hr>`;
+    const aiWrap   = document.createElement('div');
+    aiWrap.innerHTML = '<strong><i class="fas fa-robot"></i> AI回答:</strong>';
+    const aiDiv    = document.createElement('div');
+    aiDiv.className = 'ai-message';
+    processAIMessage(aiDiv, item.response || '无回答', 'voice_history_click');
+    aiWrap.appendChild(aiDiv);
+    vr.appendChild(aiWrap);
+    vr.dataset.associatedId = String(ts);
+  });
+
+  listEl.insertBefore(li, listEl.firstChild);
+}
+
+
+
+function initVoiceAnswerHandlers() {
+    initVoiceFeature();
+
+    const clearBtn = document.getElementById('voice-clear-history');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', clearVoiceHistory);
+    }
+}
+
+
+
+// --- Selection Controls for Image Cropping ---
+function initSelectionControls() {
+    const overlayEl = document.getElementById('overlay');
+    const imgEl = document.getElementById('overlay-image');
+    const selBox = document.getElementById('selection-box');
+    
+    if (!overlayEl || !imgEl || !selBox) {
+        console.error("Required overlay elements not found for selection controls");
+        return;
+    }
+    
+    // Reset state
+    isDragging = false;
+    dragType = '';
+    
+    // Mouse down on selection box - start resize/move
+    selBox.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        isDragging = true;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        
+        // Determine drag type based on where the mouse is within the selection box
+        const rect = selBox.getBoundingClientRect();
+        const edgeThreshold = 10; // pixels from edge to consider as resize
+        
+        const isNearLeftEdge = Math.abs(e.clientX - rect.left) < edgeThreshold;
+        const isNearRightEdge = Math.abs(e.clientX - rect.right) < edgeThreshold;
+        const isNearTopEdge = Math.abs(e.clientY - rect.top) < edgeThreshold;
+        const isNearBottomEdge = Math.abs(e.clientY - rect.bottom) < edgeThreshold;
+        
+        if (isNearRightEdge && isNearBottomEdge) dragType = 'resize-se';
+        else if (isNearLeftEdge && isNearBottomEdge) dragType = 'resize-sw';
+        else if (isNearRightEdge && isNearTopEdge) dragType = 'resize-ne';
+        else if (isNearLeftEdge && isNearTopEdge) dragType = 'resize-nw';
+        else if (isNearRightEdge) dragType = 'resize-e';
+        else if (isNearLeftEdge) dragType = 'resize-w';
+        else if (isNearBottomEdge) dragType = 'resize-s';
+        else if (isNearTopEdge) dragType = 'resize-n';
+        else dragType = 'move';
+        
+        // Update cursor based on drag type
+        if (dragType === 'resize-se' || dragType === 'resize-nw') selBox.style.cursor = 'nwse-resize';
+        else if (dragType === 'resize-sw' || dragType === 'resize-ne') selBox.style.cursor = 'nesw-resize';
+        else if (dragType === 'resize-e' || dragType === 'resize-w') selBox.style.cursor = 'ew-resize';
+        else if (dragType === 'resize-s' || dragType === 'resize-n') selBox.style.cursor = 'ns-resize';
+        else selBox.style.cursor = 'move';
+    });
+    
+    // Mouse down on image (outside selection) - start new selection
+    imgEl.addEventListener('mousedown', (e) => {
+        if (e.target === imgEl) { // Only if directly on the image, not on the selection box
+            e.preventDefault();
+            isDragging = true;
+            dragType = 'new-selection';
+            dragStartX = e.clientX;
+            dragStartY = e.clientY;
+            
+            // Calculate position relative to image
+            const imgRect = imgEl.getBoundingClientRect();
+            const x = e.clientX - imgRect.left;
+            const y = e.clientY - imgRect.top;
+            
+            // Start with a 1x1 selection at the click point
+            selection = {
+                x: x,
+                y: y,
+                width: 1,
+                height: 1
+            };
+            
+            updateSelectionBox();
+        }
+    });
+    
+    // Mouse move - update selection based on drag type
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        e.preventDefault();
+        
+        const dx = e.clientX - dragStartX;
+        const dy = e.clientY - dragStartY;
+        const imgRect = imgEl.getBoundingClientRect();
+        
+        // Handle different drag types
+        if (dragType === 'new-selection') {
+            // For new selection, adjust width and height based on drag direction
+            if (dx > 0) {
+                selection.width = dx;
+            } else {
+                selection.x = Math.max(0, selection.x + dx);
+                selection.width = Math.abs(dx);
+            }
+            
+            if (dy > 0) {
+                selection.height = dy;
+            } else {
+                selection.y = Math.max(0, selection.y + dy);
+                selection.height = Math.abs(dy);
+            }
+            
+            // Ensure selection stays within image bounds
+            if (selection.x + selection.width > imgEl.width) {
+                selection.width = imgEl.width - selection.x;
+            }
+            if (selection.y + selection.height > imgEl.height) {
+                selection.height = imgEl.height - selection.y;
+            }
+        } else if (dragType === 'move') {
+            // Move the entire selection
+            selection.x = Math.max(0, Math.min(imgEl.width - selection.width, selection.x + dx));
+            selection.y = Math.max(0, Math.min(imgEl.height - selection.height, selection.y + dy));
+        } else if (dragType.startsWith('resize-')) {
+            // Resize the selection based on which edge/corner is being dragged
+            if (dragType.includes('e')) { // Right edge
+                selection.width = Math.max(10, Math.min(imgEl.width - selection.x, selection.width + dx));
+            }
+            if (dragType.includes('w')) { // Left edge
+                const newX = Math.max(0, Math.min(selection.x + selection.width - 10, selection.x + dx));
+                selection.width = selection.x + selection.width - newX;
+                selection.x = newX;
+            }
+            if (dragType.includes('s')) { // Bottom edge
+                selection.height = Math.max(10, Math.min(imgEl.height - selection.y, selection.height + dy));
+            }
+            if (dragType.includes('n')) { // Top edge
+                const newY = Math.max(0, Math.min(selection.y + selection.height - 10, selection.y + dy));
+                selection.height = selection.y + selection.height - newY;
+                selection.y = newY;
+            }
+        }
+        
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        updateSelectionBox();
+        
+        // Update crop info
+        const cropInfoEl = document.getElementById('crop-info');
+        if (cropInfoEl) {
+            cropInfoEl.textContent = `选择区域: ${Math.round(selection.x)},${Math.round(selection.y)} ${Math.round(selection.width)}x${Math.round(selection.height)}`;
+        }
+    });
+    
+    // Mouse up - end dragging
+    document.addEventListener('mouseup', () => {
+        if (isDragging) {
+            isDragging = false;
+            if (selBox) selBox.style.cursor = 'move';
+        }
+    });
+    
+    // Update selection box position and size
+    updateSelectionBox();
+}
+
+// --- Voice Feature Initialization ---
+
+
+// --- Storage Functions ---
+function saveChatSessionsToStorage() { 
+    try {
+        localStorage.setItem('chatSessions', JSON.stringify(chatSessions));
+    } catch(e) {
+        console.error("Failed to save chat sessions:", e);
+    } 
+}
+
+
+
+
+
+
+function updateConnectionStatus(isConnected){
+    const ind=document.getElementById('connection-indicator'),st=document.getElementById('connection-status');
+    if(ind&&st){
+        ind.className=`status-indicator ${isConnected?'connected':'disconnected'}`;
+        st.textContent=`实时连接: ${isConnected?'已连接':'未连接'}`;
+        ind.title=`Socket.IO ${isConnected?'Connected':'Disconnected'}`;
+    }
+}
+
+function updateApiInfo(d){
+    const el=document.getElementById('api-provider-display');
+    if(el){
+        el.textContent=`AI模型: ${d?.provider||'未知'}`;
+        el.title=d?.provider?`Using ${d.provider}`:'AI Provider Info Unavailable';
+    }
+}
+
+function clearScreenshotHistory(){
+    if(confirm('清空所有截图历史?')){
+        ssHistory = [];
+        document.getElementById('ss-history-list').innerHTML = '';
+        saveScreenshotHistory(); 
+    }
+}
+
+function clearCurrentChatDisplay(isNewSessionStart = false){
+    const el=document.getElementById('chat-chat-history');
+    if(el)el.innerHTML='<div class="system-message">选择记录或开始新对话...</div>';
+    currentChatSessionId=null;
+    document.getElementById('chat-session-list')?.querySelectorAll('.active-session').forEach(i=>i.classList.remove('active-session'));
+    document.getElementById('chat-chat-input')?.focus(); 
+    saveCurrentChatSessionId();
+    
+    // 如果是新会话开始，可以在这里添加额外的逻辑
+    if (isNewSessionStart) {
+        // 例如，可以清空输入框
+        const chatInputEl = document.getElementById('chat-chat-input');
+        if (chatInputEl) chatInputEl.value = '';
+        
+        // 清空文件上传预览
+        const uploadPreviewEl = document.getElementById('chat-upload-preview');
+        if (uploadPreviewEl) uploadPreviewEl.innerHTML = '';
+        uploadedFiles = null;
+        
+        // 重置文件输入
+        const fileInputEl = document.getElementById('chat-file-upload');
+        if (fileInputEl) fileInputEl.value = '';
+    }
+}
+
+function clearAllChatSessions(){
+    if(confirm('永久删除所有对话?')){
+        chatSessions=[];
+        currentChatSessionId=null;
+        const el=document.getElementById('chat-session-list');
+        if(el)el.innerHTML='';
+        clearCurrentChatDisplay();
+        saveChatSessionsToStorage();
+        saveCurrentChatSessionId();
+    }
+}
+
+function clearVoiceHistory(){
+    if(confirm('清空所有语音历史?')){
+        voiceHistory = [];
+        document.getElementById('voice-history-list').innerHTML = '';
+        saveVoiceHistory();
+    }
+
+    const player = document.getElementById('voice-answer-player');
+    if (player) {
+        player.pause();
+        player.style.display = 'none';
+        document.getElementById('voice-answer-source').src = '';
+    }
+}
+
+// --- API & Server Communication ---
+function getApiInfo() {
+    if (!TOKEN) { updateApiInfo({ provider: '未知 (Token未设置)' }); return; }
+    fetch('/api_info', { headers: { 'Authorization': `Bearer ${TOKEN}` } })
+    .then(r=>{if(r.status===401)throw new Error('Unauthorized');if(!r.ok)throw new Error(`API信息获取失败(${r.status})`);return r.json();})
+    .then(updateApiInfo).catch(e=>{console.error('API info error:',e);updateApiInfo({provider:`错误(${e.message})`});});
+}
+
+
+async function sendVoiceToServer(audioBlob) {
+    const fd = new FormData();
+    const timestamp = Date.now();
+    // 附加音频数据
+    fd.append('audio', audioBlob, `recorded_audio_${timestamp}.wav`);
+
+    // 附加客户端请求 ID
+    const requestIdForThisOperation = window.currentVoiceRequestId;
+    if (requestIdForThisOperation) {
+        fd.append('request_id', requestIdForThisOperation);
+        console.log('[VOICE] Sending voice to /process_voice with request_id:', requestIdForThisOperation);
+    } else {
+        console.error('[VOICE] Critical: requestId missing, aborting send.');
+        const voiceResultEl = document.getElementById('voice-result');
+        if (voiceResultEl) voiceResultEl.innerHTML = '<p class="error-message">请求ID丢失，无法发送语音。</p>';
+        // 恢复按钮状态
+        document.getElementById('voice-start-recording').disabled = false;
+        document.getElementById('voice-stop-recording').disabled = true;
+        return;
+    }
+
+    // 附加 Socket.IO ID
+    if (socket && socket.id) {
+        fd.append('socket_id', socket.id);
+    }
+
+    // 附加前端选择的 STT 提供商
+    const sttProvider = document.getElementById('stt-provider-select').value;
+    fd.append('stt_provider', sttProvider);
+
+    // 更新 UI
+    const voiceResultEl = document.getElementById('voice-result');
+    if (voiceResultEl) {
+        voiceResultEl.innerHTML = `<p><i class="fas fa-spinner fa-spin"></i> 处理中... (ID: ${requestIdForThisOperation.substr(0,8)})</p>`;
+    }
+    document.getElementById('voice-start-recording').disabled = true;
+    document.getElementById('voice-stop-recording').disabled = true;
+
+    // 发送到后端
+    try {
+        const response = await fetch('/process_voice', {
+            method: 'POST',
+            body: fd,
+            headers: {
+                ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` })
+            }
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || `状态: ${response.status}`);
+        }
+        console.log('[VOICE] Server ACK:', data);
+        if (data.status === 'processing') {
+            if (data.request_id !== requestIdForThisOperation) {
+                console.warn(`[VOICE] Request ID mismatch: sent ${requestIdForThisOperation}, got ${data.request_id}`);
+            }
+            // 等待 Socket.IO 事件更新最终结果
+        } else {
+            throw new Error(data.message || data.error || '处理启动失败');
+        }
+    } catch (err) {
+        console.error('[VOICE] Error sending voice:', err);
+        if (voiceResultEl) voiceResultEl.innerHTML = `<p class="error-message">发送失败: ${err.message}</p>`;
+        document.getElementById('voice-start-recording').disabled = false;
+        document.getElementById('voice-stop-recording').disabled = true;
+        window.currentVoiceRequestId = null;
+    }
+}
+
+
+function requestScreenshot(){
+    if(socket?.connected)socket.emit('request_screenshot_capture');
+    else alert('无法请求截图：未连接');
+}
+
+// --- Image Overlay & Cropping ---
+function hideImageOverlay(){
+    const o=document.getElementById('overlay'); if(o)o.style.display='none';
+    currentImage=null; const p=document.getElementById('prompt-input'); if(p)p.value='';
+}
+
+function showImageOverlay(imageUrl) {
+    const overlay=document.getElementById('overlay'),imgEl=document.getElementById('overlay-image'),selBox=document.getElementById('selection-box'),cropInf=document.getElementById('crop-info');
+    if(!overlay||!imgEl||!selBox||!cropInf)return;currentImage=imageUrl;imgEl.src='';imgEl.src=`${imageUrl}?t=${Date.now()}`;overlay.style.display='flex';
+    imgEl.onload=()=>{selection={x:0,y:0,width:imgEl.width,height:imgEl.height};updateSelectionBox();initSelectionControls();cropInf.textContent='拖拽调整区域或确认全图';};
+    imgEl.onerror=()=>{alert('图片预览加载失败');hideImageOverlay();};
+}
+
+function confirmCrop() {
+    if (!currentImage) { alert('错误：没有当前图片。'); return; }
+    const overlayImageEl = document.getElementById('overlay-image');
+    if (!overlayImageEl || !overlayImageEl.naturalWidth) { alert('错误：图片未加载。'); return; }
+    const scaleX = overlayImageEl.naturalWidth / overlayImageEl.width;
+    const scaleY = overlayImageEl.naturalHeight / overlayImageEl.height;
+    const oSel = { 
+        x: Math.round(selection.x * scaleX), y: Math.round(selection.y * scaleY), 
+        width: Math.round(selection.width * scaleX), height: Math.round(selection.height * scaleY) 
+    };
+
+    const fd = new FormData();
+    fd.append('image_url', currentImage); // original image URL
+    fd.append('x', oSel.x); fd.append('y', oSel.y);
+    fd.append('width', oSel.width); fd.append('height', oSel.height);
+    
+    const prmptEl = document.getElementById('prompt-input');
+    if (prmptEl?.value.trim()) fd.append('prompt', prmptEl.value.trim());
+
+    // Add selected model information
+    if (selectedModel.provider && selectedModel.model_id) {
+        fd.append('provider', selectedModel.provider);
+        fd.append('model_id', selectedModel.model_id);
+    } else {
+        console.warn("Confirm Crop: No model selected, backend will use default for analysis.");
+    }
+
+    const analysisEl = document.getElementById('ss-ai-analysis');
+    if (analysisEl) analysisEl.innerHTML = `<i class="fas fa-spinner fa-spin"></i> 分析裁剪区域 (模型: ${selectedModel.provider || '默认'}/${selectedModel.model_id || '默认'})...`;
+    hideImageOverlay(); // Assuming defined
+
+    fetch('/crop_image', { method: 'POST', headers: { ...(TOKEN && {'Authorization': `Bearer ${TOKEN}`}) }, body: fd })
+    .then(r => {
+        if (!r.ok) return r.json().catch(() => ({error: `HTTP ${r.status}`})).then(eD => { throw new Error(eD.message || eD.error || `HTTP ${r.status}`) });
+        return r.json();
+    })
+    .then(d => {
+        debugLog(`Crop and re-analysis request acknowledged: ${JSON.stringify(d)}`);
+        // Analysis result will come via SocketIO event 'analysis_result' or 'new_screenshot'
+    })
+    .catch(e => {
+        console.error('Crop image error:', e);
+        alert(`裁剪或分析出错: ${e.message}`);
+        if (analysisEl) analysisEl.textContent = `分析失败: ${e.message}`;
+    });
+}
+
+
+
+
+// Make sure initAllFeatures is the last thing called or is wrapped in DOMContentLoaded
+document.addEventListener('DOMContentLoaded', () => {
+  // 首先初始化Socket连接
+  initSocket(); 
+  
+  // 然后初始化其他功能
+  initAllFeatures();
+});
+
+
+
+
+
+
+/* =========================================================
+   统一发送文字 / 文件 / 粘贴图
+   ========================================================= */
+// main.js
+
+/**
+ * 发送聊天消息（文本、选择的文件、粘贴的图片）。
+ * 所有类型的消息（包括纯文本）都将通过 HTTP POST 请求发送到 /chat_with_file 接口。
+ */
+async function sendChatMessage() {    // --- 0. 获取必要的DOM元素和状态 ---    const chatInputEl = document.getElementById('chat-chat-input');    const chatHistoryEl = document.getElementById('chat-chat-history');    const previewWrapEl = document.getElementById('chat-upload-preview');        // 获取流式设置，如果元素不存在则默认为true    const streamingCheckbox = document.getElementById('streaming-toggle-checkbox');    const useStreaming = streamingCheckbox ? streamingCheckbox.checked : true; // 后端会决定是否流式
+
+    // --- 1. 基础校验 ---
+    if (!chatInputEl || !chatHistoryEl || !previewWrapEl) {
+        console.error("sendChatMessage: Critical UI elements (input, history, or preview) not found.");
+        // 也可以考虑在此处调用 appendSystemMessage，但如果 chatHistoryEl 都没有，就只能 console.error
+        return;
+    }
+    if (!selectedModel.provider || !selectedModel.model_id) {
+        appendSystemMessage('请先从顶部选择一个 AI 模型。', chatHistoryEl);
+        return;
+    }
+
+    const inputText = chatInputEl.value.trim();
+    const filesSelected = uploadedFiles.length > 0 ? [...uploadedFiles] : [];
+    const imagesPastedBase64 = window.pastedImageBase64Array && window.pastedImageBase64Array.length > 0 ? [...window.pastedImageBase64Array] : [];
+
+
+    // ✨ 添加详细的日志进行调试 ✨
+    console.log(`[DEBUG] sendChatMessage values:`);
+    console.log(`  inputText: "${inputText}" (type: ${typeof inputText}, length: ${inputText.length})`);
+    console.log(`  !inputText: ${!inputText}`);
+    console.log(`  filesSelected.length: ${filesSelected.length}`);
+    console.log(`  imagesPastedBase64.length: ${imagesPastedBase64.length}`);
+    const conditionResult = !inputText && filesSelected.length === 0 && imagesPastedBase64.length === 0;
+    console.log(`  Condition (!inputText && filesSelected.length === 0 && imagesPastedBase64.length === 0) is: ${conditionResult}`);
+
+    if (conditionResult) { // 使用计算好的条件结果
+        debugLog("sendChatMessage: No content (text, files, or pasted images) to send.");
+        return; // 没有内容可发送
+    }
+
+    // --- 2. 获取或创建当前聊天会话 ---
+    let currentSession = chatSessions.find(s => s.id === currentChatSessionId);
+    if (!currentSession) {
+        const newTitleBase = inputText ||
+                           (filesSelected.length > 0 ? filesSelected[0].name : '') ||
+                           (imagesPastedBase64.length > 0 ? `粘贴的图片 (${imagesPastedBase64.length}张)` : '新对话');
+        currentSession = {
+            id: generateUUID(),
+            title: newTitleBase.substring(0, 35) + (newTitleBase.length > 35 ? '...' : ''),
+            history: [],
+            createdAt: Date.now()
+        };
+        chatSessions.unshift(currentSession);
+        if (typeof addChatHistoryItem === "function") addChatHistoryItem(currentSession);
+        currentChatSessionId = currentSession.id;
+        if (typeof saveCurrentChatSessionId === "function") saveCurrentChatSessionId();
+        if (typeof setActiveChatSessionUI === "function") setActiveChatSessionUI(currentChatSessionId);
+    }
+
+    // --- 3. 构建用户消息内容（用于历史记录和UI气泡） ---
+    const messagePartsForDisplay = []; // 用于构建用户气泡的 parts
+    if (inputText) {
+        messagePartsForDisplay.push({ type: 'text', content: inputText });
+    }
+    if (filesSelected.length > 0) {
+        messagePartsForDisplay.push({ type: 'files', files: filesSelected.map(f => ({ name: f.name, size: f.size })) });
+    }
+    if (imagesPastedBase64.length > 0) {
+        messagePartsForDisplay.push({ type: 'pasted_images', count: imagesPastedBase64.length, base64Array: imagesPastedBase64 });
+    }
+    
+
+    // 生成用于存储到 session.history 的文本描述 (更简洁，主要用于AI上下文)
+    let historyLogText = inputText;
+    if (filesSelected.length > 0) {
+        historyLogText += (historyLogText ? "\n" : "") + `[用户上传了 ${filesSelected.length} 个文件: ${filesSelected.map(f=>f.name).join(', ')}]`;
+    }
+    if (imagesPastedBase64.length > 0) {
+        historyLogText += (historyLogText ? "\n" : "") + `[用户粘贴了 ${imagesPastedBase64.length} 张图片]`;
+    }
+    if (!historyLogText && (filesSelected.length > 0 || imagesPastedBase64.length > 0)) {
+        historyLogText = "[用户发送了媒体内容]"; // 如果只有文件/图片没有文本
+    }
+
+
+    // 生成用于显示在用户聊天气泡中的HTML内容
+    let userBubbleHTML = '';
+    messagePartsForDisplay.forEach((part, index) => {
+        let partHTML = '';
+        if (part.type === 'text') {
+            partHTML = escapeHtml(part.content);
+        } else if (part.type === 'files') {
+            partHTML = `<i class="fas fa-paperclip"></i> ${part.files.length} 个文件: ${part.files.map(f => escapeHtml(f.name)).join(', ')}`;
+        } else if (part.type === 'pasted_images') {
+            let pastedImagesPreviewHTMLInBubble = '';
+            part.base64Array.forEach((base64, idx) => {
+                pastedImagesPreviewHTMLInBubble += `<img src="data:image/png;base64,${base64}" alt="pasted image ${idx+1}" style="max-width:50px; max-height:50px; margin:2px; border:1px solid var(--bs-border-color); border-radius:3px; display:inline-block;">`;
+            });
+            partHTML = `<div class="pasted-images-preview-in-bubble my-1">${pastedImagesPreviewHTMLInBubble}</div> (${part.count} 张粘贴的图片)`;
+        }
+
+        if (userBubbleHTML && partHTML) { // 如果不是第一部分且当前部分有内容
+            userBubbleHTML += (part.type === 'text' && messagePartsForDisplay[index-1]?.type === 'text') ? (' ' + partHTML) : ('<br>' + partHTML);
+        } else {
+            userBubbleHTML += partHTML;
+        }
+    });
+
+    if (!userBubbleHTML.trim()) { // 避免发送完全是空内容的气泡
+         if (filesSelected.length > 0 || imagesPastedBase64.length > 0) {
+            userBubbleHTML = "(已发送媒体内容)";
+         } else {
+            debugLog("sendChatMessage: User bubble content is empty. Not sending.");
+            return;
+         }
+    }
+
+
+    // --- 4. 更新UI：添加用户消息气泡和会话历史 ---
+    if (historyLogText) { // 只有当 historyLogText 不为空时才添加到历史记录
+        currentSession.history.push({ role: 'user', parts: [{ text: historyLogText }] });
+    }
+
+    const userMessageDiv = document.createElement('div');
+    userMessageDiv.className = 'user-message';
+    userMessageDiv.innerHTML = `<strong>您: </strong><div class="message-content">${userBubbleHTML}</div>`;
+    chatHistoryEl.appendChild(userMessageDiv);
+
+    if (chatHistoryEl.firstElementChild && chatHistoryEl.firstElementChild.classList.contains('system-message') && chatHistoryEl.firstElementChild.textContent.includes('选择左侧记录或开始新对话')) {
+        chatHistoryEl.firstElementChild.remove();
+    }
+
+    // --- 5. 准备AI请求ID和"思考中"UI ---
+    const requestId = generateUUID();
+    const thinkingIndicatorDiv = document.createElement('div');
+    thinkingIndicatorDiv.className = 'ai-message ai-thinking';
+    thinkingIndicatorDiv.dataset.requestId = requestId;
+    thinkingIndicatorDiv.innerHTML = `<i class="fas fa-spinner fa-spin"></i> AI (${selectedModel.provider}/${selectedModel.model_id}) 正在思考...`;
+    chatHistoryEl.appendChild(thinkingIndicatorDiv);
+    if (typeof scrollToChatBottom === "function") scrollToChatBottom(chatHistoryEl);
+
+    currentSession.history.push({
+        role: 'model', parts: [{ text: '' }], temp_id: requestId,
+        provider: selectedModel.provider, model_id: selectedModel.model_id
+    });
+    const historyForAI = currentSession.history.slice(0, -1);
+
+    // --- 6. 统一通过 HTTP FormData 发送所有内容到 /chat_with_file ---
+    const formData = new FormData();
+    formData.append('prompt', inputText); // 用户输入的原始文本提示
+    formData.append('history', JSON.stringify(historyForAI));
+    formData.append('session_id', currentSession.id); // 后端 /chat_with_file 可能会用到
+    formData.append('request_id', requestId);
+    formData.append('provider', selectedModel.provider);
+    formData.append('model_id', selectedModel.model_id);
+
+    // 添加选择的文件 (File 对象)
+    filesSelected.forEach(file => {
+        formData.append('files', file, file.name); // 后端用 request.files.getlist("files")
+    });
+
+    // 添加粘贴的图片的Base64数据数组 (作为JSON字符串)
+    if (imagesPastedBase64.length > 0) {
+        formData.append('pasted_images_base64_json_array', JSON.stringify(imagesPastedBase64));
+    }
+    formData.append('use_streaming', useStreaming);
+    debugLog(`Sending unified request to /chat_with_file. Files: ${filesSelected.length}, Pasted Images: ${imagesPastedBase64.length}, Prompt: "${inputText}"`);
+
+    fetch('/chat_with_file', {
+        method: 'POST',
+        headers: { ...(TOKEN && { 'Authorization': `Bearer ${TOKEN}` }) },
+        body: formData
+    })
+    .then(response => {
+        if (!response.ok) {
+            return response.json().catch(() => ({
+                error: `HTTP Error: ${response.status} ${response.statusText}`,
+                details: `Response body was not valid JSON or empty.`
+            })).then(errData => Promise.reject(errData));
+        }
+        return response.json();
+    })
+    .then(data => {
+        debugLog('/chat_with_file request acknowledged:', data);
+        // AI的回复将通过Socket.IO事件 (chat_stream_chunk, chat_stream_end) 返回并更新 thinkingIndicatorDiv
+        // 这些事件会使用 requestId 来匹配和更新正确的 thinkingIndicatorDiv
+    })
+    .catch(error => {
+        console.error('Error sending unified request via /chat_with_file:', error);
+        if (typeof removeThinkingIndicator === "function") removeThinkingIndicator(chatHistoryEl, thinkingIndicatorDiv);
+        else if (thinkingIndicatorDiv.parentNode) thinkingIndicatorDiv.parentNode.removeChild(thinkingIndicatorDiv);
+
+        // 从会话历史中移除对应的AI占位符，因为它不会有回复了
+        const modelPlaceholderIdx = currentSession.history.findIndex(m => m.temp_id === requestId);
+        if (modelPlaceholderIdx > -1) currentSession.history.splice(modelPlaceholderIdx, 1);
+
+        appendSystemMessage(`请求发送失败: ${error.error || error.message || JSON.stringify(error) || '未知错误'}`, chatHistoryEl);
+    });
+
+    // --- 7. 清理前端状态 ---
+    chatInputEl.value = '';
+    if (previewWrapEl) previewWrapEl.innerHTML = '';
+    uploadedFiles = [];
+    if (window.pastedImageBase64Array) window.pastedImageBase64Array = [];
+                                                selection.height = dy;            } else {                selection.y = Math.max(0, selection.y + dy);                selection.height = Math.abs(dy);            }                        // 更新选区显示            updateSelectionDisplay();        }    });        // Mouse up - stop dragging    document.addEventListener('mouseup', () => {        if (isDragging) {            isDragging = false;            dragType = '';        }    });}// 初始化socket连接function initSocket() {    try {        // 语音结果事件处理        socket.on('voice_result', function(data) {            // ---------- 3. 写入 voiceHistory 数组并保存 ----------            const ts = data.timestamp !== undefined && data.timestamp !== null ? data.timestamp : Date.now();            const item = {                timestamp : ts,                transcript: data.transcript || '',                response  : data.response   || '',                audio_url : data.audio_url  || ''            };            if (typeof addVoiceHistoryItem === "function") {                addVoiceHistoryItem(item);   // 会自动 push/unshift + saveVoiceHistory()            }        });                // 聊天流式块        socket.on('chat_stream_chunk', function(data) {            // 处理流式响应块            console.log('[Socket] Received chat_stream_chunk:', data.chunk?.substring(0, 30) + '...');            // 在这里处理流式响应块的逻辑        });                // 聊天流式结束        socket.on('chat_stream_end', function(data) {            // 处理流式响应结束            console.log('[Socket] Received chat_stream_end:', data);            // 在这里处理流式响应结束的逻辑        });                console.log('Socket.IO initialized successfully with all event handlers');    } catch (err) {        console.error('Failed to initialize Socket.IO:', err);        // 在页面上显示错误，方便调试        const connectionStatus = document.getElementById('connection-status');        if (connectionStatus) {            connectionStatus.className = 'disconnected';            connectionStatus.innerText = '连接失败: ' + (err.message || '未知错误');        }    }}
 }

@@ -1,0 +1,1 @@
+修复AI对话前端流式/非流式控制的问题，主要修改点：\n\n1. 在main.js文件开头声明全局socket变量\n2. 统一整合所有socket.on事件监听到initSocket函数内\n3. 确保DOMContentLoaded事件中先初始化socket连接\n4. 修复sendChatMessage中流式设置的传递\n5. 删除重复的函数定义\n\n修复结果：用户现在可以通过UI中的streaming-toggle-checkbox成功控制AI回复是流式还是一次性返回。

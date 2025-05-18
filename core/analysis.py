@@ -105,7 +105,7 @@ def analyze_image(
             history=None, # No history for a single image analysis call usually
             model_id=current_model_id,
             provider=current_provider,
-            image_base64=image_base64_data
+            images_base64=[image_base64_data]
         )
 
         # chat_result 应该包含 'provider', 'model_id', 'message'

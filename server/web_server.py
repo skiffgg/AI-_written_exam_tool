@@ -246,13 +246,14 @@ def _task_chat_only(
     history: Optional[List[Dict[str, Any]]],
     request_id: str,
     sid: Optional[str], # Socket ID, 仅当通过Socket调用时存在
-    use_streaming: bool = True,
+    use_streaming: bool,
     model_id: Optional[str] = None,
     provider_name: Optional[str] = None,
     image_base64: Optional[str] = None, # 旧的单图参数 (可能来自旧的socket调用)
     all_images_base64: Optional[List[str]] = None # 新的，来自 /chat_with_file 的图片列表
                                                 # 也可用于新的 socket 调用 (如果 socket 也发列表)
 ):
+    log.info(f"[_TASK_CHAT_ONLY Start] request_id: {request_id}, use_streaming: {use_streaming}") # 添加日志
     final_model_id, final_provider = _determine_model_and_provider(model_id, provider_name, ModelProvider.OPENAI)
     if not final_model_id or not final_provider:
         err_msg = f"无法为聊天确定有效的模型或提供商。请求的模型: {model_id}, 提供商: {provider_name}"
@@ -319,7 +320,7 @@ def _task_chat_only(
             emit_data_response = {'request_id': request_id, 'message': message_text,
                                     'provider': final_provider, 'model_id': final_model_id}
             if sid: socketio.emit('chat_response', emit_data_response, to=sid)
-            # else: # 对于HTTP请求的非流式响应，结果通常直接在HTTP响应中返回
+            else:   socketio.emit('chat_response', emit_data_response)
             # 我们当前的 /chat_with_file 接口是异步启动任务，不直接返回AI结果
             log.debug(f"[Task {request_id}] Non-streaming response generated. Emitted 'chat_response' if SID present.")
             
@@ -530,7 +531,13 @@ def handle_chat_message_socket(data: Dict[str, Any]):
     prompt = data.get('prompt', '').strip()
     history_data = data.get('history', [])
     client_request_id = data.get('request_id')
-    use_streaming = data.get('use_streaming', True) # 假设前端会传这个
+    
+    # 正确处理前端传来的 use_streaming 参数：确保转换为布尔值
+    use_streaming_str = str(data.get('use_streaming', 'true')).lower()
+    use_streaming = use_streaming_str == 'true' or use_streaming_str == 'yes' or use_streaming_str == '1'
+    
+    log.info(f"聊天流式/非流式设置: use_streaming={use_streaming} (原始值：{data.get('use_streaming')})")
+    
     selected_model_id = data.get('model_id')
     selected_provider = data.get('provider')
 
@@ -798,10 +805,18 @@ def chat_with_file_route():
     
     log.info(f"[Req {form_request_id}] HTTP POST to /chat_with_file received (unified media).")
 
+    # --- 在这里添加日志 ---
+    log.info(f"[CHAT WITH FILE ROUTE] Received form_request_id: {form_request_id}")
+    # --- 日志添加结束 ---
+    
+    log.info(f"[Req {form_request_id}] HTTP POST to /chat_with_file received (unified media).")
+
     prompt_from_user = request.form.get('prompt', '').strip()
     history_json_str = request.form.get('history', '[]')
     selected_model_id = request.form.get('model_id')
     selected_provider = request.form.get('provider')
+    use_streaming = request.form.get('use_streaming') == 'true'  # This checks if the checkbox is checked
+    log.info(f"[CHAT_WITH_FILE] Received use_streaming_raw: '{use_streaming}', Converted use_streaming: {use_streaming}") # 添加日志
     # session_id_from_form = request.form.get('session_id') # 可选
 
     history_data = []
@@ -890,7 +905,7 @@ def chat_with_file_route():
             history=history_data,
             request_id=form_request_id,
             sid=None, # HTTP 请求没有 sid
-            use_streaming=True, # 假设统一使用流式，或从请求参数获取
+            use_streaming=use_streaming, # 假设统一使用流式，或从请求参数获取
             model_id=selected_model_id,
             provider_name=selected_provider,
             # **传递整合后的图片Base64列表**

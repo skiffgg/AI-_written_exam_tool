@@ -85,6 +85,13 @@ class Settings(BaseSettings):
     # --- 文本文件处理最大字符数 ---
     MAX_TEXT_FILE_CHARS: int = Field(default=4000, validation_alias='MAX_TEXT_FILE_CHARS')
 
+        # 默认的最大令牌数，用于流式通信
+    GEMINI_MAX_TOKENS_STREAM: int = 8192
+    GEMINI_MAX_TOKENS: int = 8192
+    GEMINI_TEMPERATURE_STREAM: float = 0.7
+    GEMINI_TEMPERATURE: float = 0.7
+
+
     # --- 外部 URL 和 CORS 配置 ---
     external_url: Optional[str] = Field(
         default=None,
@@ -121,9 +128,9 @@ class Settings(BaseSettings):
         return proxies or None
 
     def get_httpx_client(self) -> Optional[httpx.Client]:
+        """proxy settings.
         """
-        Returns an httpx.Client that respects OS environment proxy settings.
-        """
+        # Returns an httpx.Client that respects OS environment 
         if httpx is None:
             log.warning("httpx not installed, cannot configure HTTP client.")
             return None

@@ -12,8 +12,15 @@ from typing import Any, Dict, List, Optional, Callable
 import os # 确保导入 os
 
 import openai # Ensure openai is imported
-import google.generativeai as genai
+from google import genai                # <--- 新的SDK导入方式
+from google.genai import types
+
+from google.genai import types as genai_types
 from PIL import Image # For Gemini image processing
+from google.genai import Client as GeminiClient
+from google.genai import errors as genai_errors # 导入 SDK 的错误模块
+from google.api_core import exceptions as google_api_exceptions # Google 通用 API 错误
+
 
 from core.settings import settings
 from core.constants import (
@@ -230,41 +237,118 @@ def _chat_openai_stream(
         raise
 
 # === Gemini Chat Function (Multimodal) ===
-def _configure_gemini_if_needed():
-    """Configures Gemini API key. Relies on env vars for proxies."""
-    # This function assumes genai.configure might be called multiple times
-    # but ideally it's called once at app startup.
-    # This check is a bit heuristic and might not be perfectly robust
-    # for all states of the genai library.
-    configured_api_key = None
-    try:
-        # Attempt to get a model to see if it's configured; this is indirect
-        # A more direct way to check if `configure` has been called with a key
-        # is not readily available in the public API of google-generativeai.
-        # We assume if we can get a model without error, it's likely configured.
-        # This is not ideal, but avoids the 'अभीClient' error.
-        genai.get_model("gemini-pro") # Try a common model
-        # If the above doesn't raise an error about API key, it might be configured.
-        # However, there's no direct way to get the currently configured key.
-        # So, we will re-configure if settings.gemini_api_key is present,
-        # as genai.configure can be called multiple times.
-    except Exception: # pylint: disable=broad-except
-        # Likely not configured or API key issue
-        pass # We will configure below if key is present in settings
+# core/chat.py
 
-    if settings.gemini_api_key:
+# 全局变量，用于存储单例实例
+_gemini_client_instance = None
+
+def get_gemini_client() -> GeminiClient:
+    global _gemini_client_instance
+    if _gemini_client_instance is None:
+        if not settings.gemini_api_key:
+            raise ValueError("Gemini API key not configured in settings.")
         try:
-            genai.configure(api_key=settings.gemini_api_key) # Removed transport and client_options
-            log.debug("Gemini API configured/re-configured with API key from settings.")
-            # http_proxy_env = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
-            # https_proxy_env = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
-            # log.debug(f"Gemini proxy check - HTTP_PROXY env: {http_proxy_env}, HTTPS_PROXY env: {https_proxy_env}")
-        except Exception as e_cfg:
-            log.error(f"Failed to configure Gemini API: {e_cfg}", exc_info=True)
-            raise ConnectionError(f"Failed to configure Gemini API: {e_cfg}") from e_cfg
-    else:
-        raise ValueError("Gemini API key not found in settings for configuration.")
+            # 配置http选项，如果需要使用代理，可以在这里设置
+            client_config_args = {"api_key": settings.gemini_api_key}
 
+            # 这里我们没有指定 http_options, 如果需要设置API版本等可以添加
+            # 例如：client_config_args["http_options"] = genai_types.HttpOptions(api_version='v1beta')
+
+            # 创建Gemini客户端实例
+            _gemini_client_instance = GeminiClient(**client_config_args)
+            log.debug("Gemini client (google-genai SDK) created successfully.")
+
+            # 检查代理环境变量
+            http_proxy_env = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
+            https_proxy_env = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
+            log.debug(f"Gemini Client - HTTP_PROXY env: {http_proxy_env}, HTTPS_PROXY env: {https_proxy_env}")
+            
+            if not https_proxy_env and (http_proxy_env or https_proxy_env):
+                log.warning("HTTPS_PROXY environment variable is not set. Gemini SDK might not use the V2Ray proxy correctly for HTTPS traffic.")
+
+        except Exception as e_cfg:
+            log.error(f"Failed to create Gemini client (google-genai SDK): {e_cfg}", exc_info=True)
+            raise ConnectionError(f"Failed to create Gemini client: {e_cfg}") from e_cfg
+    return _gemini_client_instance
+
+# --- Helper to construct Gemini contents list ---
+def _prepare_gemini_contents(
+    prompt: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+    images_base64: Optional[List[str]] = None
+) -> tuple[list[genai_types.Content], int]:
+    gemini_request_contents: list[genai_types.Content] = []
+    num_images_processed = 0
+
+    # Process history
+    if history:
+        for turn in history:
+            role = turn.get("role")
+            if role not in ["user", "model"]:
+                continue
+            
+            current_turn_parts_for_history: list[genai_types.PartType] = []
+            parts_data = turn.get("parts")
+
+            if isinstance(parts_data, list):
+                for part_item in parts_data:
+                    if isinstance(part_item, dict) and "text" in part_item and str(part_item["text"]).strip():
+                        current_turn_parts_for_history.append(genai_types.Part.from_text(text=str(part_item["text"])))
+                    # TODO: Handle images in history if your format supports it.
+                    # Example: if "image_bytes" in part_item:
+                    #   pil_img = Image.open(io.BytesIO(part_item["image_bytes"]))
+                    #   current_turn_parts_for_history.append(pil_img)
+            elif isinstance(turn.get("content"), str) and str(turn.get("content")).strip(): # Compatibility with OpenAI like history
+                current_turn_parts_for_history.append(genai_types.Part.from_text(text=str(turn.get("content"))))
+            
+            if current_turn_parts_for_history:
+                gemini_request_contents.append(genai_types.Content(role=role, parts=current_turn_parts_for_history))
+
+    # Process current user prompt and images
+    current_user_prompt_parts: list[genai_types.PartType] = []
+    if prompt:
+        current_user_prompt_parts.append(genai_types.Part.from_text(text=prompt))
+
+    if images_base64 and isinstance(images_base64, list):
+        for img_b64_string in images_base64:
+            if isinstance(img_b64_string, str) and img_b64_string.strip():
+                try:
+                    image_bytes = base64.b64decode(img_b64_string)
+                    # pil_image = Image.open(io.BytesIO(image_bytes))
+                    image_part = genai_types.Part.from_data(data=image_bytes, mime_type="image/png") 
+                    current_user_prompt_parts.append(image_part)
+                    num_images_processed += 1
+                    num_images_processed += 1
+                except Exception as e_img:
+                    log.error(f"Failed to decode/open image for Gemini content: {e_img}", exc_info=True)
+            else:
+                log.warning("Skipped an invalid base64 string in images_base64 list for Gemini.")
+    
+    if current_user_prompt_parts:
+        gemini_request_contents.append(genai_types.Content(role="user", parts=current_user_prompt_parts))
+    elif not gemini_request_contents: # No history and no current valid input
+        log.warning("Gemini: No history and no valid current input (prompt/images).")
+        # Caller should handle this by returning an error or appropriate message
+
+    return gemini_request_contents, num_images_processed
+    if not settings.gemini_api_key: # 假设您的settings实例叫 settings
+        raise ValueError("Gemini API 密钥未在settings中配置。")
+
+    try:
+        # 根据PyPI文档，API密钥可以直接传入Client，或者设置 GOOGLE_API_KEY 环境变量
+        client = genai.Client(api_key=settings.gemini_api_key)
+        log.debug("Gemini client (google-genai SDK) 创建成功。")
+
+        # 打印代理环境变量，确认它们是否被Python环境感知
+        http_proxy_env = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
+        https_proxy_env = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
+        log.debug(f"Gemini Client - HTTP_PROXY env: {http_proxy_env}, HTTPS_PROXY env: {https_proxy_env}")
+        if not https_proxy_env and (http_proxy_env or https_proxy_env):
+             log.warning("警告：HTTPS_PROXY 环境变量未设置，但HTTP_PROXY可能已设置。Gemini SDK 可能无法正确通过V2Ray代理处理HTTPS流量。")
+        return client
+    except Exception as e_cfg:
+        log.error(f"创建 Gemini client (google-genai SDK) 失败: {e_cfg}", exc_info=True)
+        raise ConnectionError(f"创建 Gemini client 失败: {e_cfg}") from e_cfg
 
 # core/chat.py
 
@@ -275,146 +359,274 @@ def _chat_gemini(
     prompt: str,
     history: Optional[List[Dict[str, Any]]] = None,
     model_id: Optional[str] = None,
-    images_base64: Optional[List[str]] = None # ✨ MODIFIED: Expect a list
+    images_base64: Optional[List[str]] = None
 ) -> str:
-    _configure_gemini_if_needed()
+    client = get_gemini_client()
 
     effective_model_id = model_id or get_default_model_for_provider(ModelProvider.GEMINI)
-    # Ensure a vision model is used if images are present
-    if images_base64 and ("vision" not in effective_model_id and "flash" not in effective_model_id and not effective_model_id.startswith("gemini-1.5-pro")): # Adjusted check for 1.5 pro
-        vision_default = get_default_model_for_provider(ModelProvider.GEMINI, vision_capable=True)
-        log.warning(f"Gemini model '{effective_model_id}' might not support images or is not preferred for vision. Attempting to switch.")
-        if vision_default:
-            effective_model_id = vision_default
-            log.info(f"Switched to vision-capable Gemini model: '{effective_model_id}'.")
-        else: # Fallback if no vision default found from constants
-            effective_model_id = "gemini-1.5-flash-latest" # A known good vision model
-            log.warning(f"No specific vision default found, defaulted to '{effective_model_id}'.")
-    if not effective_model_id: # Should have been set by now
-        effective_model_id = "gemini-1.5-flash-latest" # Final fallback
+    if not effective_model_id:
+        effective_model_id = "gemini-1.5-flash-latest"
+        log.warning(f"Gemini non-stream model defaulted to absolute fallback: {effective_model_id}")
 
-    gemini_contents: List[Dict[str, Any]] = [] # For Gemini, this should be List[genai.types.ContentDict] or similar
-                                             # but List[Dict] is used for broader compatibility before conversion
-    
-    # Process history (assuming text-only history for simplicity)
-    if history:
-        for turn in history:
-            role = turn.get("role")
-            if role not in ["user", "model"]: continue
-            
-            parts_data = turn.get("parts")
-            gemini_history_parts = []
-            if isinstance(parts_data, list):
-                for part_item in parts_data:
-                    if isinstance(part_item, dict) and "text" in part_item and str(part_item["text"]).strip():
-                        gemini_history_parts.append(str(part_item["text"])) # Gemini parts can be just strings for text
-            elif isinstance(parts_data, str) and parts_data.strip():
-                gemini_history_parts.append(parts_data)
-            elif isinstance(turn.get("content"), str) and str(turn.get("content")).strip(): # OpenAI history format
-                gemini_history_parts.append(str(turn.get("content")))
-            
-            if gemini_history_parts:
-                 gemini_contents.append({'role': role, 'parts': gemini_history_parts})
+    if "gemini-" in effective_model_id and not effective_model_id.startswith("models/") and not effective_model_id.endswith(("-001", "-preview")):
+        log.info(f"Prepending 'models/' to Gemini non-stream model ID: {effective_model_id}")
+        effective_model_id = f"models/{effective_model_id}"
 
+    gemini_request_contents, num_images_processed = _prepare_gemini_contents(prompt, history, images_base64)
 
-    # --- ✨ MODIFIED: Construct parts for the current user turn with multiple images ---
-    current_user_parts_for_gemini: List[Any] = [] # Gemini parts can be str or PIL.Image
-    if prompt:
-        current_user_parts_for_gemini.append(prompt) # Text part
-    
-    num_images_processed_for_gemini = 0
-    if images_base64 and isinstance(images_base64, list):
-        for img_b64_string in images_base64:
-            if isinstance(img_b64_string, str) and img_b64_string.strip():
-                try:
-                    image_bytes = base64.b64decode(img_b64_string)
-                    pil_image = Image.open(io.BytesIO(image_bytes))
-                    # Gemini API can take PIL.Image objects directly in the 'parts' list
-                    current_user_parts_for_gemini.append(pil_image)
-                    num_images_processed_for_gemini += 1
-                except Exception as e_img:
-                    log.error(f"Failed to decode/open image for Gemini: {e_img}", exc_info=True)
-                    # current_user_parts_for_gemini.append("(Error: Could not process one of the images)") # Optional: add error text part
-            else:
-                log.warning(f"Skipped an invalid base64 string in images_base64 list for Gemini.")
-    # --- End of multi-image construction ---
-    
-    if current_user_parts_for_gemini:
-        gemini_contents.append({'role': 'user', 'parts': current_user_parts_for_gemini})
-    elif not gemini_contents:
-         log.warning("Gemini chat called with no history, no prompt, and no valid images.")
-         return "请输入您的问题或提供有效的图片。"
+    if not gemini_request_contents:
+        log.warning("Gemini non-stream: No content to send after preparation.")
+        return "请求内容为空，请输入问题或提供有效图片。"
 
-    if not gemini_contents: # Final check
-        log.warning("Gemini chat: No valid content to send after processing all inputs.")
-        return "无法处理请求，对话内容为空或媒体处理失败。"
+    system_instruction_text = None
+    raw_system_message = _prepare_system_message(ModelProvider.GEMINI)
+    if raw_system_message and isinstance(raw_system_message, dict) and "content" in raw_system_message:
+         system_instruction_text = raw_system_message["content"]
 
-    model_params = {"model_name": effective_model_id}
-    # system_instruction logic can be added here if needed for Gemini Pro models
-    # system_instruction_content = _prepare_system_message(ModelProvider.GEMINI)
-    # if system_instruction_content: # This is None in current _prepare_system_message
-    #    model_params["system_instruction"] = system_instruction_content 
-    
-    model = genai.GenerativeModel(**model_params)
-    
-    gemini_max_tokens = settings.GEMINI_MAX_TOKENS if hasattr(settings, 'GEMINI_MAX_TOKENS') else 8192 # Default for Gemini 1.5 Flash
-    gemini_temperature = settings.GEMINI_TEMPERATURE if hasattr(settings, 'GEMINI_TEMPERATURE') else 0.7
+    generation_config_dict = {
+        "max_output_tokens": settings.GEMINI_MAX_TOKENS,
+        "temperature": settings.GEMINI_TEMPERATURE if hasattr(settings, 'GEMINI_TEMPERATURE') else 0.7
+    }
+    gen_config_args = {**generation_config_dict}
+    if system_instruction_text:
+        gen_config_args["system_instruction"] = system_instruction_text
+    generation_config_payload = genai_types.GenerateContentConfig(**gen_config_args)
 
-    generation_config = genai.types.GenerationConfig(
-        max_output_tokens=gemini_max_tokens,
-        temperature=gemini_temperature
-        # top_p, top_k can also be added here from settings if desired
-    )
+    log.info(f"调用 Gemini Chat (google-genai SDK) (Model: {effective_model_id}). Images: {num_images_processed}. Content blocks: {len(gemini_request_contents)}")
 
-    log.info(f"调用 Gemini Chat (Model: {effective_model_id}). Images sent: {num_images_processed_for_gemini}. Prompt length: {len(prompt)}. Turns: {len(gemini_contents)}")
     try:
-        response = model.generate_content(
-            contents=gemini_contents, # type: ignore # genai expects specific content types
-            generation_config=generation_config,
-            request_options={"timeout": settings.GEMINI_REQUEST_TIMEOUT if hasattr(settings, 'GEMINI_REQUEST_TIMEOUT') else 120}
+        response = client.models.generate_content(
+            model=effective_model_id,
+            contents=gemini_request_contents,
+            
+            # request_options for timeout if applicable
         )
-        # ... (rest of response processing and error handling from your _chat_gemini) ...
+
         response_text = ""
-        if hasattr(response, 'parts') and response.parts:
-            for part in response.parts:
-                if hasattr(part, 'text'): response_text += part.text
-        elif hasattr(response, 'text') and response.text:
+        if hasattr(response, 'text') and response.text:
             response_text = response.text
+        elif hasattr(response, 'parts') and response.parts:
+            for part in response.parts:
+                if hasattr(part, 'text') and part.text:
+                    response_text += part.text
         
-        if not response_text: 
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                reason = response.prompt_feedback.block_reason.name
-                log.warning(f"Gemini response blocked. Reason: {reason}. Feedback: {response.prompt_feedback}")
-                return f"(内容因 {reason} 被阻止)"
-            if hasattr(response, 'candidates') and response.candidates and \
-               response.candidates[0].finish_reason != genai.types.FinishReason.STOP: # Check if not normal stop
-                finish_reason_name = response.candidates[0].finish_reason.name
-                safety_ratings_str = str(response.candidates[0].safety_ratings) if hasattr(response.candidates[0], 'safety_ratings') else "N/A"
-                log.warning(f"Gemini generation finished with non-STOP reason: {finish_reason_name}. Safety: {safety_ratings_str}")
-                if response.candidates[0].finish_reason == genai.types.FinishReason.SAFETY:
-                     return "(内容因安全原因被终止或过滤)"
-        log.info("Gemini Chat 调用成功 (或API调用完成).")
+        if not response_text:
+            prompt_feedback = getattr(response, 'prompt_feedback', None)
+            if prompt_feedback and getattr(prompt_feedback, 'block_reason', None):
+                reason = prompt_feedback.block_reason
+                reason_name = getattr(reason, 'name', str(reason))
+                log.warning(f"Gemini response blocked. Reason: {reason_name}. Feedback: {prompt_feedback}")
+                return f"(内容因 {reason_name} 被阻止)"
+            
+            candidates = getattr(response, 'candidates', [])
+            if candidates:
+                candidate = candidates[0]
+                finish_reason_enum = getattr(candidate, 'finish_reason', None)
+                # Check against specific enum values from genai_types.Candidate.FinishReason
+                if finish_reason_enum and \
+                   finish_reason_enum != genai_types.Candidate.FinishReason.STOP and \
+                   finish_reason_enum != genai_types.Candidate.FinishReason.UNSPECIFIED:
+                    reason_name = getattr(finish_reason_enum, 'name', str(finish_reason_enum))
+                    safety_ratings_str = str(getattr(candidate, 'safety_ratings', "N/A"))
+                    log.warning(f"Gemini generation finished with non-STOP reason: {reason_name}. Safety: {safety_ratings_str}")
+                    if finish_reason_enum == genai_types.Candidate.FinishReason.SAFETY:
+                         return "(内容因安全原因被终止或过滤)"
+                    return f"(AI回复因 {reason_name} 提前结束)"
+
+        log.info("Gemini Chat (google-genai SDK) 调用成功。")
         return response_text.strip() if response_text else "(AI未能生成有效文本回复)"
 
-    # ... (keep your existing specific Gemini error handling: InvalidArgument, PermissionDenied etc.) ...
-    except google_api_exceptions.InvalidArgument as e:
-        log.error(f"Gemini API InvalidArgument (Model {effective_model_id}): {e}", exc_info=True)
-        return f"AI请求参数错误 (Gemini): {str(e)[:200]}"
-    except google_api_exceptions.PermissionDenied as e:
-        log.error(f"Gemini API PermissionDenied (Model {effective_model_id}): {e}", exc_info=True)
-        return f"Gemini API密钥无效或权限不足。请检查配置。"
-    except google_api_exceptions.ResourceExhausted as e:
-        log.error(f"Gemini API ResourceExhausted (Model {effective_model_id}): {e}", exc_info=True)
-        return f"Gemini API资源用尽 (例如达到配额)。请稍后再试。"
-    except google_api_exceptions.FailedPrecondition as e:
-        log.error(f"Gemini API FailedPrecondition (Model {effective_model_id}): {e}", exc_info=True)
-        return f"调用Gemini API的前提条件不满足 (例如API未启用): {str(e)[:200]}"
-    except google_api_exceptions.GoogleAPIError as e:
-        log.error(f"Gemini API error (Model {effective_model_id}): {e}", exc_info=True)
-        raise
     except Exception as e:
-        log.error(f"Unexpected error during Gemini API call (Model {effective_model_id}): {e}", exc_info=True)
+        log.error(f"Gemini API non-stream request blocked (Model {effective_model_id}): {e}", exc_info=True)
+        return "(您的请求因包含不当内容被阻止)"
+    except genai_types.StopCandidateException as e:
+        log.error(f"Gemini API non-stream generation stopped (Model {effective_model_id}): {e}", exc_info=True)
+        return f"(AI回复提前终止: {e})"
+    except google_api_exceptions.GoogleAPIError as e:
+        log.error(f"Gemini API non-stream error (Model {effective_model_id}): {e}", exc_info=True)
+        return f"Gemini API 错误: {str(e)[:200]}"
+    except Exception as e:
+        log.error(f"调用Gemini API非流式时发生意外错误 (Model {effective_model_id}): {e}", exc_info=True)
         raise
+
+# def _chat_gemini_stream(
+#     prompt: str,
+#     history: Optional[List[Dict[str, Any]]] = None,
+#     stream_callback: Optional[Callable[[str], None]] = None,
+#     model_id: Optional[str] = None,
+#     images_base64: Optional[List[str]] = None
+# ) -> str:
+#     client = get_gemini_client()
+
+#     effective_model_id = model_id or get_default_model_for_provider(ModelProvider.GEMINI)
+#     if not effective_model_id: # Should have a default from constants
+#         effective_model_id = "gemini-1.5-flash-latest" # Absolute fallback
+#         log.warning(f"Gemini stream model defaulted to absolute fallback: {effective_model_id}")
+
+#     # Model name formatting for the new SDK (e.g., 'models/gemini-1.5-flash-latest')
+#     # The PyPI examples show 'gemini-2.0-flash-001' working directly.
+#     # However, for models like 'gemini-1.5-pro', the 'models/' prefix is often needed.
+#     # Let's be cautious and add 'models/' if it's a common pattern and not a specific versioned ID like 'xxx-001'.
+#     if "gemini-" in effective_model_id and not effective_model_id.startswith("models/") and not effective_model_id.endswith(("-001", "-preview")):
+#         log.info(f"Prepending 'models/' to Gemini stream model ID: {effective_model_id}")
+#         effective_model_id = f"models/{effective_model_id}"
+
+#     gemini_request_contents, num_images_processed = _prepare_gemini_contents(prompt, history, images_base64)
+
+#     if not gemini_request_contents:
+#         log.warning("Gemini stream: No content to send after preparation.")
+#         if stream_callback: stream_callback("[错误: 请求内容为空，请输入问题或提供有效图片。]")
+#         return "请求内容为空，请输入问题或提供有效图片。"
+
+#     # --- Generation Config ---
+#     # System prompt for Gemini is part of GenerateContentConfig
+#     system_instruction_text = None
+#     raw_system_message = _prepare_system_message(ModelProvider.GEMINI) # This returns None currently
+#     if raw_system_message and isinstance(raw_system_message, dict) and "content" in raw_system_message:
+#          system_instruction_text = raw_system_message["content"]
+
+#     generation_config_dict = {
+#         "max_output_tokens": settings.GEMINI_MAX_TOKENS_STREAM,
+#         "temperature": settings.GEMINI_TEMPERATURE_STREAM if hasattr(settings, 'GEMINI_TEMPERATURE_STREAM') else 0.7
+#         # Add other parameters like top_k, top_p if needed
+#     }
+#     # PyPI docs: config=types.GenerateContentConfig(system_instruction='...', ...)
+#     # So, we build the GenerateContentConfig object
+#     gen_config_args = {**generation_config_dict}
+#     if system_instruction_text:
+#         gen_config_args["system_instruction"] = system_instruction_text
+
+#     generation_config_payload = genai_types.GenerateContentConfig(**gen_config_args)
+
+#     log.debug(f"Gemini Stream Request Contents: {gemini_request_contents}")
+#     log.info(f"调用 Gemini Chat Stream (google-genai SDK) (Model: {effective_model_id}). Images: {num_images_processed}. Content blocks: {len(gemini_request_contents)}")
+
+#     try:
+#         response_stream = client.models.generate_content_stream(
+#             model=effective_model_id,
+#             contents=gemini_request_contents,
+#             config=types.GenerateContentConfig(  # 使用 config 参数
+#             max_output_tokens=8192,  # 根据需要调整输出最大令牌
+#             temperature=0.7,  # 调整温度
+#             )
+#             # request_options in client.models.generate_content for timeout is not explicitly shown in PyPI for v1.15.0
+#             # Timeout might be managed at the client level (genai.Client(http_options=...)) or via default httpx timeouts
+#         )
+#         log.debug(f"Gemini Stream Response: {response_stream}")
+
+#         # accumulated_response_text = ""
+#         # for chunk in response_stream:  # 迭代流响应
+#         #     if hasattr(chunk, 'text') and chunk.text:
+#         #         accumulated_response_text += chunk.text
+#         #         print(f"Received chunk: {chunk.text}")  # 打印流式的每一部分
+#         #     elif hasattr(chunk, 'parts') and chunk.parts:
+#         #         for part in chunk.parts:
+#         #             if hasattr(part, 'text') and part.text:
+#         #                 accumulated_response_text += part.text
+
+#         #     # 如果有其他处理需求，可以加入额外的判断，如是否触发阻止反馈等
+#         #     if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback:
+#         #         block_reason = getattr(chunk.prompt_feedback, 'block_reason', None)
+#         #         if block_reason:
+#         #             reason_name = getattr(block_reason, 'name', str(block_reason))
+#         #             log.warning(f"Gemini stream: Prompt blocked. Reason: {reason_name}. Feedback: {chunk.prompt_feedback}")
+#         #             return accumulated_response_text.strip() or f"(内容因 {reason_name} 被阻止)"
+#         # print(f"Final generated text: {accumulated_response_text}")  # 打印最终的生成文本
+#         # log.info(f"Gemini Stream completed with {len(accumulated_response_text)} characters.")
+#         # return accumulated_response_text.strip() 
+
+#     # except Exception as e:
+#     #     log.error(f"Error during Gemini stream: {e}", exc_info=True)
+#     #     return f"Error: {str(e)}"
+        
+#         accumulated_response_text = ""
+#         chunk_count = 0
+#         log.debug(f"[Gemini Stream {effective_model_id}] Stream object obtained. Starting iteration...")
+
+#         for chunk in response_stream:
+#             chunk_count += 1
+#             current_chunk_text = ""
+            
+#             if hasattr(chunk, 'text') and chunk.text: # Simplest way to get text if available
+#                 current_chunk_text = chunk.text
+#             elif hasattr(chunk, 'parts') and chunk.parts:
+#                 for part in chunk.parts:
+#                     if hasattr(part, 'text') and part.text:
+#                          current_chunk_text += part.text
+            
+#             # Safety/Blocking checks (on each chunk as it might terminate the stream)
+#             if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback:
+#                 block_reason = getattr(chunk.prompt_feedback, 'block_reason', None)
+#                 if block_reason: # block_reason is an enum like BlockReason.SAFETY
+#                     reason_name = getattr(block_reason, 'name', str(block_reason)) # Get enum name
+#                     log.warning(f"Gemini stream: Prompt blocked after {chunk_count} chunks. Reason: {reason_name}. Feedback: {chunk.prompt_feedback}")
+#                     if stream_callback: stream_callback(f"[内容因 {reason_name} 被阻止]")
+#                     # Return what has been accumulated so far, or the block message
+#                     return accumulated_response_text.strip() or f"(内容因 {reason_name} 被阻止)"
+
+
+#             if hasattr(chunk, 'candidates') and chunk.candidates:
+#                 candidate = chunk.candidates[0]
+#                 finish_reason_enum = getattr(candidate, 'finish_reason', None)
+#                 if finish_reason_enum: # This is Candidate.FinishReason enum
+#                     # log.debug(f"[Gemini Stream Debug] Chunk {chunk_count} - Candidate Finish Reason: {finish_reason_enum.name if hasattr(finish_reason_enum, 'name') else finish_reason_enum}")
+#                     if finish_reason_enum == genai_types.Candidate.FinishReason.SAFETY:
+#                         safety_ratings_str = str(getattr(candidate, 'safety_ratings', "N/A"))
+#                         log.warning(f"Gemini stream: Safety stop indicated in chunk {chunk_count}. Ratings: {safety_ratings_str}")
+#                         if stream_callback: stream_callback("[内容因安全原因被终止或过滤]")
+#                         return accumulated_response_text.strip() or "(内容因安全原因被终止或过滤)"
+#                     # Other finish reasons like MAX_TOKENS might also appear on the last chunk.
+#                     # If it's not STOP or UNSPECIFIED, and we got text, we usually continue accumulating.
+#                     # The loop will break naturally if the stream ends.
+            
+#             if current_chunk_text:
+#                 accumulated_response_text += current_chunk_text
+#                 if stream_callback:
+#                     try:
+#                         stream_callback(current_chunk_text)
+#                     except Exception as cb_exc:
+#                         log.error(f"Stream callback error on chunk {chunk_count}: {cb_exc}", exc_info=True)
+#             # else:
+#                 # log.debug(f"[Gemini Stream {effective_model_id}] Chunk {chunk_count} had no processable text directly on .text or .parts[0].text.")
+
+#         log.info(f"Gemini Chat Stream (google-genai SDK) iteration finished. Total chunks: {chunk_count}. Full text length: {len(accumulated_response_text)}")
+        
+#         # After the loop, one final check on the response_stream object itself, if the SDK populates final feedback there
+#         final_prompt_feedback = getattr(response_stream, 'prompt_feedback', None) # This might not exist on the stream iterator directly after consumption
+#         if final_prompt_feedback and getattr(final_prompt_feedback, 'block_reason', None):
+#             reason = final_prompt_feedback.block_reason
+#             log.warning(f"Gemini stream: Final prompt feedback indicates blocking. Reason: {getattr(reason, 'name', str(reason))}")
+#             return accumulated_response_text.strip() or f"(内容因 {getattr(reason, 'name', str(reason))} 被阻止)"
+
+#         if not accumulated_response_text.strip() and chunk_count == 0:
+#             log.warning("Gemini stream returned no data and no explicit error or block reason identified from chunks.")
+#             return "(AI未能生成有效文本回复或流为空)"
+        
+         
+
+#         return accumulated_response_text.strip()
+
+#     # except Exception as e: # Specific exception from the new SDK
+#     #     log.error(f"Gemini API stream request blocked (Exception) (Model {effective_model_id}): {e}", exc_info=True)
+#     #     if stream_callback: stream_callback("[错误: 您的请求因包含不当内容被阻止]")
+#     #     return "(您的请求因包含不当内容被阻止)"
+#     except genai_types.StopCandidateException as e: # If generation stops for non-standard reasons
+#         log.error(f"Gemini API stream generation stopped unexpectedly (StopCandidateException) (Model {effective_model_id}): {e}", exc_info=True)
+#         # This exception might contain more details about why it stopped.
+#         # For now, a generic message.
+#         error_message_detail = str(e) # Or inspect e.finish_reason if available
+#         if stream_callback: stream_callback(f"[错误: AI回复提前终止 - {error_message_detail}]")
+#         return f"(AI回复提前终止: {error_message_detail})"
+#     except google_api_exceptions.GoogleAPIError as e: # General Google API errors
+#         log.error(f"Gemini API stream error (GoogleAPIError) (Model {effective_model_id}): {e}", exc_info=True)
+#         if stream_callback: stream_callback(f"[错误: Gemini API Stream Error - {str(e)}]")
+#         # It's better to raise a more specific or caught exception if this happens
+#         raise # Or return a user-friendly error message
+#     except Exception as e:
+#         log.error(f"调用Gemini API流时发生意外错误 (Model {effective_model_id}): {e}", exc_info=True)
+#         if stream_callback: stream_callback(f"[错误: Gemini流意外错误 - {str(e)}]")
+#         raise # Re-throw for the main dispatcher to catch
+
 
 
 def _chat_gemini_stream(
@@ -422,140 +634,114 @@ def _chat_gemini_stream(
     history: Optional[List[Dict[str, Any]]] = None,
     stream_callback: Optional[Callable[[str], None]] = None,
     model_id: Optional[str] = None,
-    images_base64: Optional[List[str]] = None # ✨ MODIFIED: Expect a list
+    images_base64: Optional[List[str]] = None
 ) -> str:
-    _configure_gemini_if_needed()
-
+    client = get_gemini_client()
     effective_model_id = model_id or get_default_model_for_provider(ModelProvider.GEMINI)
-    # (Ensure vision model logic similar to _chat_gemini)
-    if images_base64 and ("vision" not in effective_model_id and "flash" not in effective_model_id and not effective_model_id.startswith("gemini-1.5-pro")):
-        vision_default = get_default_model_for_provider(ModelProvider.GEMINI, vision_capable=True)
-        if vision_default: effective_model_id = vision_default
-        else: effective_model_id = "gemini-1.5-flash-latest" # Fallback
-    if not effective_model_id: effective_model_id = "gemini-1.5-flash-latest"
+    # ... (模型名称处理和内容准备逻辑 _prepare_gemini_contents 不变) ...
+    gemini_request_contents, num_images_processed = _prepare_gemini_contents(prompt, history, images_base64)
 
+    if not gemini_request_contents:
+        # ... (处理空内容) ...
+        if stream_callback: stream_callback("[错误: 请求内容为空。]")
+        return "请求内容为空。"
 
-    gemini_contents: List[Dict[str, Any]] = []
-    # (History processing as in _chat_gemini - simplified for brevity, ensure it's robust)
-    if history:
-        for turn in history:
-            role = turn.get("role")
-            if role not in ["user", "model"]: continue
-            parts_data = turn.get("parts")
-            gemini_history_parts = []
-            if isinstance(parts_data, list): # Gemini format
-                for part_item in parts_data:
-                    if isinstance(part_item, dict) and "text" in part_item and str(part_item["text"]).strip():
-                        gemini_history_parts.append(str(part_item["text"]))
-            elif isinstance(parts_data, str) and parts_data.strip(): # Simpler text part
-                 gemini_history_parts.append(parts_data)
-            elif isinstance(turn.get("content"), str) and str(turn.get("content")).strip(): # OpenAI format
-                gemini_history_parts.append(str(turn.get("content")))
-            if gemini_history_parts:
-                 gemini_contents.append({'role': role, 'parts': gemini_history_parts})
-
-
-    # --- ✨ MODIFIED: Construct parts for the current user turn with multiple images ---
-    current_user_parts_for_gemini: List[Any] = []
-    if prompt:
-        current_user_parts_for_gemini.append(prompt)
-    
-    num_images_processed_for_gemini_stream = 0
-    if images_base64 and isinstance(images_base64, list):
-        for img_b64_string in images_base64:
-            if isinstance(img_b64_string, str) and img_b64_string.strip():
-                try:
-                    image_bytes = base64.b64decode(img_b64_string)
-                    pil_image = Image.open(io.BytesIO(image_bytes))
-                    current_user_parts_for_gemini.append(pil_image)
-                    num_images_processed_for_gemini_stream +=1
-                except Exception as e_img:
-                    log.error(f"Failed to decode/open image for Gemini stream: {e_img}", exc_info=True)
-            else:
-                log.warning(f"Skipped an invalid base64 string in images_base64 list for Gemini stream.")
-    # --- End of multi-image construction ---
-
-    if current_user_parts_for_gemini:
-        gemini_contents.append({'role': 'user', 'parts': current_user_parts_for_gemini})
-    elif not gemini_contents: # No history and no current input
-        log.warning("Gemini stream: No history, no prompt, no valid images.")
-        if stream_callback: stream_callback("[ERROR: 请输入问题或提供有效的图片。]")
-        return "请输入问题或提供有效的图片。"
-    if not gemini_contents: # Final check if somehow still empty
-        log.warning("Gemini stream: No valid content to send after processing all inputs.")
-        if stream_callback: stream_callback("[ERROR: 无法处理请求，对话内容为空或媒体处理失败。]")
-        return "无法处理请求，对话内容为空或媒体处理失败。"
-
-    model_params = {"model_name": effective_model_id}
-    model = genai.GenerativeModel(**model_params)
-    
-    gemini_max_tokens_stream = settings.GEMINI_MAX_TOKENS_STREAM if hasattr(settings, 'GEMINI_MAX_TOKENS_STREAM') else 8192
-    gemini_temperature_stream = settings.GEMINI_TEMPERATURE_STREAM if hasattr(settings, 'GEMINI_TEMPERATURE_STREAM') else 0.7
-
-    generation_config = genai.types.GenerationConfig(
-        max_output_tokens=gemini_max_tokens_stream,
-        temperature=gemini_temperature_stream
+    generation_config_payload = genai_types.GenerateContentConfig(
+        # max_output_tokens 和 temperature 来自您的 settings
+        max_output_tokens=settings.GEMINI_MAX_TOKENS_STREAM, 
+        temperature=settings.GEMINI_TEMPERATURE_STREAM if hasattr(settings, 'GEMINI_TEMPERATURE_STREAM') else 0.7
+        # 如果有 system_instruction，也应在此处设置
     )
-    log.info(f"调用 Gemini Chat Stream (Model: {effective_model_id}). Images sent: {num_images_processed_for_gemini_stream}. Turns: {len(gemini_contents)}")
-    try:
-        response_stream = model.generate_content(
-            contents=gemini_contents, # type: ignore
-            generation_config=generation_config,
-            stream=True,
-            request_options={"timeout": settings.GEMINI_REQUEST_TIMEOUT_STREAM if hasattr(settings, 'GEMINI_REQUEST_TIMEOUT_STREAM') else 180}
-        )
-        accumulated_response_text = ""
-        for chunk in response_stream:
-            chunk_text = ""
-            # (Robust chunk text extraction as in _chat_gemini_stream - ensure this is correct)
-            if hasattr(chunk, 'parts') and chunk.parts:
-                for part in chunk.parts:
-                    if hasattr(part, 'text') and part.text: chunk_text += part.text
-            elif hasattr(chunk, 'text') and chunk.text: 
-                chunk_text = chunk.text
-            
-            # (Safety/blocking checks as in _chat_gemini_stream - ensure this is correct)
-            if hasattr(chunk, 'prompt_feedback') and chunk.prompt_feedback.block_reason:
-                reason = chunk.prompt_feedback.block_reason.name
-                log.warning(f"Gemini stream: Prompt blocked. Reason: {reason}")
-                if stream_callback: stream_callback(f"[内容因 {reason} 被阻止]")
-                if not accumulated_response_text.strip(): return f"(内容因 {reason} 被阻止)" 
-                break 
-            if hasattr(chunk, 'candidates') and chunk.candidates and \
-               hasattr(chunk.candidates[0], 'finish_reason') and \
-               chunk.candidates[0].finish_reason == genai.types.FinishReason.SAFETY:
-                safety_ratings_str = str(chunk.candidates[0].safety_ratings) if hasattr(chunk.candidates[0], 'safety_ratings') else "N/A"
-                log.warning(f"Gemini stream: Safety stop. Ratings: {safety_ratings_str}")
-                if stream_callback: stream_callback("[内容因安全原因被终止或过滤]")
-                if not accumulated_response_text.strip(): return "(内容因安全原因被终止或过滤)"
-                break
+    # system_instruction_text = _prepare_system_message(ModelProvider.GEMINI) # 这在您代码中返回 None
+    # if system_instruction_text:
+    #     generation_config_payload.system_instruction = system_instruction_text # 动态添加
 
-            if chunk_text:
-                accumulated_response_text += chunk_text
+    log.info(f"调用 Gemini Chat Stream (Model: {effective_model_id}). Images: {num_images_processed}. Contents len: {len(gemini_request_contents)}")
+
+    accumulated_response_text = ""
+    try:
+        response_stream = client.models.generate_content_stream(
+            model=effective_model_id,
+            contents=gemini_request_contents,
+            config=generation_config_payload, # 使用构建好的 config 对象
+            # request_options={'timeout': 600} # 如果需要设置超时
+        )
+
+        for stream_chunk in response_stream:
+            current_chunk_text = ""
+        
+            # Check if the chunk contains 'text' or any relevant field
+            if hasattr(stream_chunk, 'text') and stream_chunk.text:
+                current_chunk_text = stream_chunk.text
+            elif hasattr(stream_chunk, 'parts'):  # Check if 'parts' exists
+                for part in stream_chunk.parts:
+                    if hasattr(part, 'text') and part.text:
+                        current_chunk_text += part.text
+
+            if current_chunk_text:
+                accumulated_response_text += current_chunk_text
                 if stream_callback:
-                    try:
-                        stream_callback(chunk_text)
-                    except Exception as cb_exc:
-                        log.error(f"Stream callback error: {cb_exc}", exc_info=True)
+                    stream_callback(current_chunk_text)
         
-        log.info("Gemini Chat Stream 调用成功。")
-        if not accumulated_response_text.strip() and not (
-            (hasattr(response_stream, '_error') and response_stream._error) or # type: ignore
-            (hasattr(response_stream, 'prompt_feedback') and response_stream.prompt_feedback.block_reason) or # type: ignore
-            (hasattr(response_stream, 'candidates') and response_stream.candidates and response_stream.candidates[0].finish_reason == genai.types.FinishReason.SAFETY) # type: ignore
-        ):
-            log.warning("Gemini stream returned no text, and no explicit error or block/safety reason identified.")
-            return "(AI未能生成有效文本回复)"
+            # Check for block reason and handle it
+            if hasattr(stream_chunk, 'prompt_feedback') and stream_chunk.prompt_feedback:
+                block_reason = getattr(stream_chunk.prompt_feedback, 'block_reason', None)
+                if block_reason:
+                    reason_name = getattr(block_reason, 'name', 'Unknown reason')
+                    log.warning(f"Gemini stream: Prompt blocked due to {reason_name}.")
+                    return accumulated_response_text.strip() or f"[Content blocked due to {reason_name}]"
+
+            
+            # 检查 candidates 中的 finish_reason (通常在流的末尾或中断时出现)
+            # 注意：SDK 的具体行为可能是在流结束时才通过 response_stream.candidates 提供最终的 finish_reason，
+            # 或者在每次迭代的 chunk 中都提供。文档对此不总是非常明确，需要测试。
+            # 如果在每个 chunk 都有 candidates，可以在这里检查。
+            # if stream_chunk.candidates:
+            #     for candidate in stream_chunk.candidates:
+            #         if candidate.finish_reason:
+            #             finish_reason_name = candidate.finish_reason.name
+            #             if finish_reason_name != "STOP" and finish_reason_name != "UNSPECIFIED":
+            #                 log.warning(f"Gemini stream: Candidate finished with reason: {finish_reason_name}")
+            #                 if finish_reason_name == "SAFETY":
+            #                     error_msg = "[内容因安全原因被终止或过滤]"
+            #                     if stream_callback: stream_callback(error_msg)
+            #                     return accumulated_response_text.strip() or error_msg
+            #                 # 可以根据其他 finish_reason 做不同处理
+
+        # 流正常结束后，可以检查整个响应对象的最终状态 (如果 SDK 设计如此)
+        # resolved_response = response_stream.resolve() # 有些 SDK 有这样的方法获取完整响应对象
+        # if resolved_response and resolved_response.prompt_feedback and resolved_response.prompt_feedback.block_reason:
+        #     # ... 处理最终的阻塞信息 ...
+
+        log.info(f"Gemini Chat Stream 迭代完成。累积文本长度: {len(accumulated_response_text)}")
         return accumulated_response_text.strip()
-        
-    except google_api_exceptions.GoogleAPIError as e:
-        log.error(f"Gemini API stream error (Model {effective_model_id}): {e}", exc_info=True)
-        if stream_callback: stream_callback(f"[ERROR: Gemini Stream Error - {str(e)}]")
-        raise
+
+    # except genai_errors.BlockedPromptException as e: # 明确捕获请求被阻止的异常
+    #     log.error(f"Gemini API stream: Prompt was blocked. (Model {effective_model_id}): {e}", exc_info=True)
+    #     error_msg = f"[请求内容被阻止: {e.args[0] if e.args else '原因未知'}]"
+    #     if stream_callback: stream_callback(error_msg)
+    #     return error_msg
+    # except genai_errors.StopCandidateException as e: # 尝试捕获这个（如果文档确认它存在于你的版本）
+    #     log.error(f"Gemini API stream: Generation stopped by StopCandidateException. (Model {effective_model_id}): {e}", exc_info=True)
+    #     error_msg = f"[AI回复终止于StopCandidate: {e.args[0] if e.args else '原因未知'}]"
+    #     if stream_callback: stream_callback(error_msg)
+    #     return accumulated_response_text.strip() or error_msg # 可能已经累积了一部分
+    except genai_errors.APIError as e: # 这是 SDK 推荐捕获的通用 API 错误
+        log.error(f"Gemini API stream error (APIError) (Model {effective_model_id}): {e}", exc_info=True)
+        error_msg = f"[Gemini API 错误: {e.message or str(e)}]"
+        if stream_callback: stream_callback(error_msg)
+        return error_msg # 或者根据情况返回 accumulated_response_text
+    except google_api_exceptions.GoogleAPIError as e: # 更底层的 Google API 错误
+        log.error(f"Google API core error during Gemini stream (Model {effective_model_id}): {e}", exc_info=True)
+        error_msg = f"[Google API核心错误: {str(e)}]"
+        if stream_callback: stream_callback(error_msg)
+        return error_msg
     except Exception as e:
-        log.error(f"Unexpected error during Gemini stream (Model {effective_model_id}): {e}", exc_info=True)
-        if stream_callback: stream_callback(f"[ERROR: Unexpected error during stream - {str(e)}]")
-        raise
+        log.error(f"调用Gemini API流时发生未知错误 (Model {effective_model_id}): {e}", exc_info=True)
+        error_msg = f"[错误: Gemini流处理中发生未知错误 - {str(e)}]"
+        if stream_callback: stream_callback(error_msg)
+        return error_msg
+
 
 # === Main Chat Dispatcher Functions (Multimodal) ===
 # (chat_only 和 chat_only_stream 函数保持与我上次提供的版本一致，它们调用上面修改过的内部函数)
@@ -658,10 +844,12 @@ def chat_only_stream(
             if not settings.openai_api_key: raise ValueError("OpenAI API Key missing.")
             # ✨ MODIFIED: Pass the images_base64 list
             full_msg_text = _chat_openai_stream(prompt, history, stream_callback, current_model_id, images_base64)
+            print(f"Test generated text: {full_msg_text}") 
         elif current_provider == ModelProvider.GEMINI:
             if not settings.gemini_api_key: raise ValueError("Gemini API Key missing.")
             # ✨ MODIFIED: Pass the images_base64 list
             full_msg_text = _chat_gemini_stream(prompt, history, stream_callback, current_model_id, images_base64)
+            print(f"Test generated text: {full_msg_text}") 
         # Add other providers here for streaming if any
         # elif current_provider == ModelProvider.CLAUDE:
         # ...
@@ -695,5 +883,9 @@ if __name__ == '__main__':
         print(f"OpenAI Text Only: {result_openai_txt}")
     if settings.gemini_api_key:
         print("\n--- 测试 Gemini (多模态) ---")
-        result_gemini_txt = chat_only("你好，Gemini吗?", history=None, provider=ModelProvider.GEMINI, model_id="gemini-1.5-flash-latest") # 使用最新的 flash
+        result_gemini_txt = chat_only_stream("河海大学", history=None, provider=ModelProvider.GEMINI, model_id="gemini-2.5-flash-preview-04-17") # 使用最新的 flash
+        print(f"Gemini Text Only: {result_gemini_txt}")
+    if settings.gemini_api_key:
+        print("\n--- 测试 Gemini ---")
+        result_gemini_txt = chat_only("你好，Gemini吗?", history=None, provider=ModelProvider.GEMINI, model_id="gemini-2.5-flash-preview-04-17")
         print(f"Gemini Text Only: {result_gemini_txt}")
