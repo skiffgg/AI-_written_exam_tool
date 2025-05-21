@@ -1,5 +1,6 @@
 // src/js/init/initSocket.js
 import { connectSocket } from '../services/socketService.js';
+import { handleChatStreamChunk, handleChatStreamEnd, handleTaskError } from '../features/chat.js';
 
 export default function initSocket() {
   const socket = connectSocket();
@@ -10,6 +11,10 @@ export default function initSocket() {
   socket.on('disconnect', () => {
     console.log('[Socket] 已断开连接');
   });
-  // TODO: 根据需要注册全局事件，如：
-  // socket.on('analysis_result', data => { … });
+
+  socket.on('chat_stream_chunk', handleChatStreamChunk);
+  socket.on('chat_stream_end', handleChatStreamEnd);
+  socket.on('task_error', handleTaskError); 
+  
+  return socket; 
 }
