@@ -314,10 +314,12 @@ def _prepare_gemini_contents(
             if isinstance(img_b64_string, str) and img_b64_string.strip():
                 try:
                     image_bytes = base64.b64decode(img_b64_string)
-                    # pil_image = Image.open(io.BytesIO(image_bytes))
-                    image_part = genai_types.Part.from_data(data=image_bytes, mime_type="image/png") 
+                    # TODO: Future enhancement - Determine MIME type dynamically or pass from frontend.
+                    # For now, defaulting to image/png for Gemini.
+                    current_mime_type = "image/png"
+                    log.debug(f"Gemini: Using hardcoded MIME type '{current_mime_type}' for image part. img_b64_string length: {len(img_b64_string)}")
+                    image_part = genai_types.Part.from_data(data=image_bytes, mime_type=current_mime_type)
                     current_user_prompt_parts.append(image_part)
-                    num_images_processed += 1
                     num_images_processed += 1
                 except Exception as e_img:
                     log.error(f"Failed to decode/open image for Gemini content: {e_img}", exc_info=True)
